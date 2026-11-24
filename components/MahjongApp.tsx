@@ -70,94 +70,78 @@ export default function MahjongApp() {
   }, []);
 
   const fetchLeaderboard = useCallback(async () => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .order('rank_points', { ascending: false })
-      .limit(5);
-    if (data) setLeaderboard(data as UserProfile[]);
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('rank_points', { ascending: false })
+        .limit(5);
+      if (data) setLeaderboard(data as UserProfile[]);
+    } catch {}
   }, []);
 
-  // Sapu bersih room temporary yang sudah kosong dari manusia atau kadaluarsa (> 2 jam)
+  // Pembersihan ringan sekali jalan tanpa looping berat
   const cleanupOrphanRooms = useCallback(async () => {
     try {
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       const { data: oldRooms } = await supabase
         .from('rooms')
         .select('id')
-        .lt('created_at', twoHoursAgo);
+        .lt('created_at', twoHoursAgo)
+        .limit(20);
 
       if (oldRooms && oldRooms.length > 0) {
         const ids = oldRooms.map((r) => r.id);
-        await supabase.from('game_states').delete().in('room_id', ids);
-        await supabase.from('room_players').delete().in('room_id', ids);
+        await Promise.all([
+          supabase.from('game_states').delete().in('room_id', ids),
+          supabase.from('room_players').delete().in('room_id', ids),
+        ]);
         await supabase.from('rooms').delete().in('id', ids);
-      }
-
-      // Cek room aktif yang sudah tidak punya manusia sama sekali
-      const { data: recentRooms } = await supabase
-        .from('rooms')
-        .select('id')
-        .limit(20);
-
-      if (recentRooms && recentRooms.length > 0) {
-        for (const r of recentRooms) {
-          const { data: humans } = await supabase
-            .from('room_players')
-            .select('id')
-            .eq('room_id', r.id)
-            .eq('is_bot', false);
-
-          if (!humans || humans.length === 0) {
-            await supabase.from('game_states').delete().eq('room_id', r.id);
-            await supabase.from('room_players').delete().eq('room_id', r.id);
-            await supabase.from('rooms').delete().eq('id', r.id);
-          }
-        }
       }
     } catch {}
   }, []);
 
-  // Fungsi pembersih saat pemain keluar room / tutup tab
   const leaveAndCleanupRoom = useCallback(
     async (roomId: string, userId: string) => {
-      await supabase
-        .from('room_players')
-        .delete()
-        .eq('room_id', roomId)
-        .eq('user_id', userId);
+      try {
+        await supabase
+          .from('room_players')
+          .delete()
+          .eq('room_id', roomId)
+          .eq('user_id', userId);
 
-      // Cek apakah masih ada pemain asli (non-bot) di dalam room
-      const { data: remainingHumans } = await supabase
-        .from('room_players')
-        .select('id, user_id')
-        .eq('room_id', roomId)
-        .eq('is_bot', false)
-        .order('seat_index', { ascending: true });
+        const { data: remainingHumans } = await supabase
+          .from('room_players')
+          .select('id, user_id')
+          .eq('room_id', roomId)
+          .eq('is_bot', false)
+          .order('seat_index', { ascending: true });
 
-      if (!remainingHumans || remainingHumans.length === 0) {
-        await supabase.from('game_states').delete().eq('room_id', roomId);
-        await supabase.from('room_players').delete().eq('room_id', roomId);
-        await supabase.from('rooms').delete().eq('id', roomId);
-      } else {
-        const { data: roomInfo } = await supabase
-          .from('rooms')
-          .select('host_id')
-          .eq('id', roomId)
-          .maybeSingle();
-
-        if (roomInfo && roomInfo.host_id === userId && remainingHumans[0]?.user_id) {
-          await supabase
+        if (!remainingHumans || remainingHumans.length === 0) {
+          await Promise.all([
+            supabase.from('game_states').delete().eq('room_id', roomId),
+            supabase.from('room_players').delete().eq('room_id', roomId),
+          ]);
+          await supabase.from('rooms').delete().eq('id', roomId);
+        } else {
+          const { data: roomInfo } = await supabase
             .from('rooms')
-            .update({ host_id: remainingHumans[0].user_id })
-            .eq('id', roomId);
+            .select('host_id')
+            .eq('id', roomId)
+            .maybeSingle();
+
+          if (roomInfo && roomInfo.host_id === userId && remainingHumans[0]?.user_id) {
+            await supabase
+              .from('rooms')
+              .update({ host_id: remainingHumans[0].user_id })
+              .eq('id', roomId);
+          }
         }
-      }
+      } catch {}
     },
     []
   );
 
-  // Otomatis bersihkan kursi / room jika pemain menutup tab atau browser
   useEffect(() => {
     const handleTabClose = () => {
       const r = activeRoomRef.current;
@@ -188,74 +172,82 @@ export default function MahjongApp() {
     return [];
   }, []);
 
-  // Pulihkan room tersimpan saat halaman di-refresh
   const restoreSavedRoomIfAny = useCallback(
     async (userId: string) => {
       if (typeof window === 'undefined') return;
-      const savedCode =
-        sessionStorage.getItem(ACTIVE_ROOM_STORAGE_KEY) ||
-        localStorage.getItem(ACTIVE_ROOM_STORAGE_KEY);
-      if (!savedCode) return;
+      try {
+        const savedCode =
+          sessionStorage.getItem(ACTIVE_ROOM_STORAGE_KEY) ||
+          localStorage.getItem(ACTIVE_ROOM_STORAGE_KEY);
+        if (!savedCode) return;
 
-      const { data: roomRow } = await supabase
-        .from('rooms')
-        .select('*')
-        .eq('room_code', savedCode.toUpperCase())
-        .maybeSingle();
+        const { data: roomRow } = await supabase
+          .from('rooms')
+          .select('*')
+          .eq('room_code', savedCode.toUpperCase())
+          .maybeSingle();
 
-      if (!roomRow) {
+        if (!roomRow) {
+          clearSavedRoom();
+          return;
+        }
+
+        const { data: pRows } = await supabase
+          .from('room_players')
+          .select('*, profiles(username, rank_tier, rank_points)')
+          .eq('room_id', roomRow.id)
+          .order('seat_index', { ascending: true });
+
+        const amIInRoom = (pRows || []).some((p) => p.user_id === userId);
+        if (!amIInRoom) {
+          clearSavedRoom();
+          return;
+        }
+
+        setRoomPlayers(pRows || []);
+        setActiveRoom({
+          id: roomRow.id,
+          code: roomRow.room_code,
+          type: roomRow.room_type,
+          host_id: roomRow.host_id,
+        });
+        setIsPlaying(roomRow.status === 'playing');
+      } catch {
         clearSavedRoom();
-        return;
       }
-
-      const { data: pRows } = await supabase
-        .from('room_players')
-        .select('*, profiles(username, rank_tier, rank_points)')
-        .eq('room_id', roomRow.id)
-        .order('seat_index', { ascending: true });
-
-      const amIInRoom = (pRows || []).some((p) => p.user_id === userId);
-      if (!amIInRoom) {
-        clearSavedRoom();
-        return;
-      }
-
-      setRoomPlayers(pRows || []);
-      setActiveRoom({
-        id: roomRow.id,
-        code: roomRow.room_code,
-        type: roomRow.room_type,
-        host_id: roomRow.host_id,
-      });
-      setIsPlaying(roomRow.status === 'playing');
     },
     [clearSavedRoom]
   );
 
   const silentRefreshProfile = useCallback(async () => {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (!session?.user) return;
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', session.user.id)
-      .maybeSingle();
-    if (data) {
-      setProfile(data as UserProfile);
-    }
-    fetchLeaderboard();
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session?.user) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', session.user.id)
+        .maybeSingle();
+      if (data) setProfile(data as UserProfile);
+      fetchLeaderboard();
+    } catch {}
   }, [fetchLeaderboard]);
 
   const checkSession = useCallback(
     async (showSpinner = true) => {
       if (showSpinner) setLoading(true);
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
 
-      if (session?.user) {
+        if (!session?.user) {
+          setProfile(null);
+          return;
+        }
+
         const { data, error } = await supabase
           .from('profiles')
           .select('*')
@@ -265,7 +257,6 @@ export default function MahjongApp() {
         if (error) {
           setAuthError('Database Error: ' + error.message);
           setProfile(null);
-          setLoading(false);
           return;
         }
 
@@ -288,65 +279,98 @@ export default function MahjongApp() {
           if (insertErr) {
             setAuthError('Gagal membuat profil: ' + insertErr.message);
             setProfile(null);
-          } else if (created) {
-            setProfile(created as UserProfile);
+            return;
           }
+          if (created) setProfile(created as UserProfile);
         }
-        await cleanupOrphanRooms();
-        await restoreSavedRoomIfAny(session.user.id);
-        fetchLeaderboard();
-      } else {
+
+        // Jalankan tugas sekunder secara paralel di latar belakang tanpa menahan layar loading
+        void Promise.all([
+          restoreSavedRoomIfAny(session.user.id),
+          fetchLeaderboard(),
+          cleanupOrphanRooms(),
+        ]);
+      } catch (err: any) {
+        setAuthError(err?.message || 'Gagal memuat sesi.');
         setProfile(null);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     },
     [fetchLeaderboard, cleanupOrphanRooms, restoreSavedRoomIfAny]
   );
 
   useEffect(() => {
-    checkSession(true);
+    // Pengaman maksimal 4 detik agar tidak pernah stuck di layar loading
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
+    checkSession(true).finally(() => clearTimeout(safetyTimer));
+
     const { data: listener } = supabase.auth.onAuthStateChange((event) => {
       if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
         checkSession(false);
       }
     });
-    return () => listener.subscription.unsubscribe();
+
+    return () => {
+      clearTimeout(safetyTimer);
+      listener.subscription.unsubscribe();
+    };
   }, [checkSession]);
 
   async function handleGuestLogin(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
     setLoading(true);
-    const cleanName =
-      usernameInput.trim() || `Guest_${Math.floor(1000 + Math.random() * 9000)}`;
-    const { error } = await supabase.auth.signInAnonymously({
-      options: { data: { username: cleanName } },
-    });
-    if (error) setAuthError(error.message);
-    setLoading(false);
+    try {
+      const cleanName =
+        usernameInput.trim() || `Guest_${Math.floor(1000 + Math.random() * 9000)}`;
+      const { error } = await supabase.auth.signInAnonymously({
+        options: { data: { username: cleanName } },
+      });
+      if (error) {
+        setAuthError(error.message);
+        setLoading(false);
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Gagal login guest.');
+      setLoading(false);
+    }
   }
 
   async function handleEmailAuth(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
     setLoading(true);
-    if (authMode === 'register') {
-      const { error } = await supabase.auth.signUp({
-        email: emailInput,
-        password: passwordInput,
-        options: {
-          data: { username: usernameInput.trim() || emailInput.split('@')[0] },
-        },
-      });
-      if (error) setAuthError(error.message);
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: emailInput,
-        password: passwordInput,
-      });
-      if (error) setAuthError(error.message);
+    try {
+      if (authMode === 'register') {
+        const { error } = await supabase.auth.signUp({
+          email: emailInput,
+          password: passwordInput,
+          options: {
+            data: { username: usernameInput.trim() || emailInput.split('@')[0] },
+          },
+        });
+        if (error) {
+          setAuthError(error.message);
+          setLoading(false);
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: emailInput,
+          password: passwordInput,
+        });
+        if (error) {
+          setAuthError(error.message);
+          setLoading(false);
+        }
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Gagal autentikasi.');
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   async function handleLogout() {
@@ -361,7 +385,6 @@ export default function MahjongApp() {
     router.push('/');
   }
 
-  // Sinkronisasi Waiting Room & Deteksi jika Room dibubarkan / status berubah
   useEffect(() => {
     if (!activeRoom) return;
 
@@ -401,7 +424,7 @@ export default function MahjongApp() {
         await fetchPlayers(activeRoom.id);
         setIsPlaying(false);
       }
-    }, 1800);
+    }, 2000);
 
     const channel = supabase
       .channel(`room_sync_${activeRoom.id}`)
@@ -462,7 +485,6 @@ export default function MahjongApp() {
 
   async function createRoom(roomType: 'ranked' | 'private') {
     if (!profile) return;
-    await cleanupOrphanRooms();
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const { data: room, error } = await supabase
       .from('rooms')
@@ -609,12 +631,14 @@ export default function MahjongApp() {
   async function returnToWaitingRoomAsHost() {
     if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
 
-    await supabase.from('game_states').delete().eq('room_id', activeRoom.id);
-    await supabase
-      .from('room_players')
-      .delete()
-      .eq('room_id', activeRoom.id)
-      .eq('is_bot', true);
+    await Promise.all([
+      supabase.from('game_states').delete().eq('room_id', activeRoom.id),
+      supabase
+        .from('room_players')
+        .delete()
+        .eq('room_id', activeRoom.id)
+        .eq('is_bot', true),
+    ]);
     await supabase
       .from('rooms')
       .update({ status: 'waiting' })
@@ -628,8 +652,10 @@ export default function MahjongApp() {
   async function disbandRoomAsHost() {
     if (!activeRoom) return;
     const roomId = activeRoom.id;
-    await supabase.from('game_states').delete().eq('room_id', roomId);
-    await supabase.from('room_players').delete().eq('room_id', roomId);
+    await Promise.all([
+      supabase.from('game_states').delete().eq('room_id', roomId),
+      supabase.from('room_players').delete().eq('room_id', roomId),
+    ]);
     await supabase.from('rooms').delete().eq('id', roomId);
 
     clearSavedRoom();
@@ -802,7 +828,6 @@ export default function MahjongApp() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#1c1917_0%,#09090b_100%)] text-stone-100 p-3 sm:p-6">
       <div className="max-w-3xl mx-auto space-y-4 sm:space-y-6">
-        {/* Header Profil & Rank */}
         <div className="flex items-center justify-between gap-3 bg-stone-900 border border-amber-500/20 p-3.5 sm:p-4 rounded-xl shadow-lg">
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             <div className="w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-full bg-amber-500/20 border border-amber-400 flex items-center justify-center font-bold text-amber-300 text-sm">
