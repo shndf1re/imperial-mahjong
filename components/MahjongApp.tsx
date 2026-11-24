@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { supabase, UserProfile } from '@/lib/supabase';
 import MahjongTable from './MahjongTable';
 import {
@@ -31,69 +31,80 @@ export default function MahjongApp() {
     id: string;
     code: string;
     type: 'ranked' | 'private';
+    host_id: string;
   } | null>(null);
   const [roomPlayers, setRoomPlayers] = useState<any[]>([]);
   const [copied, setCopied] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [leaderboard, setLeaderboard] = useState<UserProfile[]>([]);
 
-  // Cek sesi login saat halaman dibuka
-  useEffect(() => {
-    checkSession();
-    const { data: listener } = supabase.auth.onAuthStateChange(() => {
-      checkSession();
-    });
-    return () => listener.subscription.unsubscribe();
-  }, []);
-
-  async function checkSession() {
-    setLoading(true);
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    if (session?.user) {
-      let { data } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', session.user.id)
-        .single();
-
-      // Fallback: jika trigger SQL belum selesai membuat profil, buatkan langsung
-      if (!data) {
-        const fallbackName =
-          session.user.user_metadata?.username ||
-          `Player_${session.user.id.slice(0, 5)}`;
-        const { data: inserted } = await supabase
-          .from('profiles')
-          .upsert({
-            id: session.user.id,
-            username: fallbackName,
-            is_guest: session.user.is_anonymous ?? true,
-          })
-          .select()
-          .single();
-        data = inserted;
-      }
-
-      if (data) setProfile(data as UserProfile);
-      fetchLeaderboard();
-    } else {
-      setProfile(null);
-    }
-    setLoading(false);
-  }
-
-  async function fetchLeaderboard() {
+  const fetchLeaderboard = useCallback(async () => {
     const { data } = await supabase
       .from('profiles')
       .select('*')
       .order('rank_points', { ascending: false })
       .limit(5);
     if (data) setLeaderboard(data as UserProfile[]);
-  }
+  }, []);
 
-  // 1. Login Mode Guest (Anonymous)
+  const checkSession = useCallback(async () => {
+    setLoading(true);
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (session?.user) {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', session.user.id)
+        .maybeSingle();
+
+      if (error) {
+        setAuthError('Database Error: ' + error.message);
+        setProfile(null);
+        setLoading(false);
+        return;
+      }
+
+      if (data) {
+        setProfile(data as UserProfile);
+      } else {
+        const fallbackName =
+          session.user.user_metadata?.username ||
+          `Guest_${session.user.id.slice(0, 5)}`;
+        const { data: created, error: insertErr } = await supabase
+          .from('profiles')
+          .insert({
+            id: session.user.id,
+            username: fallbackName,
+            is_guest: true,
+          })
+          .select()
+          .single();
+
+        if (insertErr) {
+          setAuthError('Gagal membuat profil: ' + insertErr.message);
+          setProfile(null);
+        } else if (created) {
+          setProfile(created as UserProfile);
+        }
+      }
+      fetchLeaderboard();
+    } else {
+      setProfile(null);
+    }
+    setLoading(false);
+  }, [fetchLeaderboard]);
+
+  useEffect(() => {
+    checkSession();
+    const { data: listener } = supabase.auth.onAuthStateChange(() => {
+      checkSession();
+    });
+    return () => listener.subscription.unsubscribe();
+  }, [checkSession]);
+
   async function handleGuestLogin(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
@@ -107,7 +118,6 @@ export default function MahjongApp() {
     setLoading(false);
   }
 
-  // 2. Login / Register Akun Permanen
   async function handleEmailAuth(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
@@ -138,7 +148,51 @@ export default function MahjongApp() {
     setIsPlaying(false);
   }
 
-  // 3. Buat Room (Ranked atau Private)
+  async function fetchPlayers(roomId: string) {
+    const { data } = await supabase
+      .from('room_players')
+      .select('*, profiles(username, rank_tier, rank_points)')
+      .eq('room_id', roomId)
+      .order('seat_index', { ascending: true });
+    if (data) setRoomPlayers(data);
+  }
+
+  // Dengarkan perubahan pemain & status room (menunggu -> bermain) secara Real-Time
+  function subscribeRoom(roomId: string) {
+    fetchPlayers(roomId);
+
+    const channel = supabase
+      .channel(`room_sync_${roomId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'room_players',
+          filter: `room_id=eq.${roomId}`,
+        },
+        () => fetchPlayers(roomId)
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'rooms',
+          filter: `id=eq.${roomId}`,
+        },
+        async (payload) => {
+          if (payload.new && payload.new.status === 'playing') {
+            await fetchPlayers(roomId);
+            setIsPlaying(true);
+          }
+        }
+      )
+      .subscribe();
+
+    return channel;
+  }
+
   async function createRoom(roomType: 'ranked' | 'private') {
     if (!profile) return;
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -153,7 +207,6 @@ export default function MahjongApp() {
       return;
     }
 
-    // Dudukkan host di kursi 0 (East)
     await supabase.from('room_players').insert({
       room_id: room.id,
       user_id: profile.id,
@@ -162,11 +215,15 @@ export default function MahjongApp() {
       is_ready: true,
     });
 
-    setActiveRoom({ id: room.id, code: room.room_code, type: roomType });
-    subscribeRoomPlayers(room.id);
+    setActiveRoom({
+      id: room.id,
+      code: room.room_code,
+      type: roomType,
+      host_id: room.host_id,
+    });
+    subscribeRoom(room.id);
   }
 
-  // 4. Gabung Private Room dengan Kode
   async function joinPrivateRoom() {
     if (!profile || !roomCodeInput.trim()) return;
     const code = roomCodeInput.trim().toUpperCase();
@@ -187,58 +244,46 @@ export default function MahjongApp() {
       .select('*')
       .eq('room_id', room.id);
 
-    const takenSeats = (existingPlayers || []).map((p) => p.seat_index);
-    const availableSeat = [0, 1, 2, 3].find((s) => !takenSeats.includes(s));
+    // Cek jika user sudah terdaftar di room ini
+    const alreadyIn = (existingPlayers || []).find((p) => p.user_id === profile.id);
+    if (!alreadyIn) {
+      const takenSeats = (existingPlayers || []).map((p) => p.seat_index);
+      const availableSeat = [0, 1, 2, 3].find((s) => !takenSeats.includes(s));
 
-    if (availableSeat === undefined) {
-      alert('Room sudah penuh (4/4 pemain).');
-      return;
+      if (availableSeat === undefined) {
+        alert('Room sudah penuh (4/4 pemain).');
+        return;
+      }
+
+      await supabase.from('room_players').insert({
+        room_id: room.id,
+        user_id: profile.id,
+        seat_index: availableSeat,
+        is_bot: false,
+        is_ready: true,
+      });
     }
 
-    await supabase.from('room_players').insert({
-      room_id: room.id,
-      user_id: profile.id,
-      seat_index: availableSeat,
-      is_bot: false,
-      is_ready: true,
+    setActiveRoom({
+      id: room.id,
+      code: room.room_code,
+      type: room.room_type,
+      host_id: room.host_id,
     });
-
-    setActiveRoom({ id: room.id, code: room.room_code, type: room.room_type });
-    subscribeRoomPlayers(room.id);
+    subscribeRoom(room.id);
   }
 
-  // Dengarkan pemain yang masuk/keluar room secara Real-Time
-  function subscribeRoomPlayers(roomId: string) {
-    fetchPlayers(roomId);
-    supabase
-      .channel(`room_${roomId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'room_players',
-          filter: `room_id=eq.${roomId}`,
-        },
-        () => fetchPlayers(roomId)
-      )
-      .subscribe();
-  }
+  // Hanya Host yang bisa memulai match: isi kursi kosong dengan Bot lalu ubah status room
+  async function startMatchAsHost() {
+    if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
 
-  async function fetchPlayers(roomId: string) {
-    const { data } = await supabase
+    const { data: latestPlayers } = await supabase
       .from('room_players')
-      .select('*, profiles(username, rank_tier, rank_points)')
-      .eq('room_id', roomId)
-      .order('seat_index', { ascending: true });
-    if (data) setRoomPlayers(data);
-  }
+      .select('*')
+      .eq('room_id', activeRoom.id);
 
-  // Isi kursi kosong dengan Bot AI lalu masuk ke Meja 3D
-  async function startMatchWithBots() {
-    if (!activeRoom) return;
     const botNames = ['Chen Tao (AI)', 'Mei Lin (AI)', 'Kenji Sato (AI)'];
-    const takenSeats = roomPlayers.map((p) => p.seat_index);
+    const takenSeats = (latestPlayers || []).map((p) => p.seat_index);
     const emptySeats = [0, 1, 2, 3].filter((s) => !takenSeats.includes(s));
 
     for (let i = 0; i < emptySeats.length; i++) {
@@ -261,9 +306,23 @@ export default function MahjongApp() {
     setIsPlaying(true);
   }
 
+  async function leaveRoom() {
+    if (activeRoom && profile) {
+      await supabase
+        .from('room_players')
+        .delete()
+        .eq('room_id', activeRoom.id)
+        .eq('user_id', profile.id);
+    }
+    setIsPlaying(false);
+    setActiveRoom(null);
+    setRoomPlayers([]);
+    fetchLeaderboard();
+  }
+
   if (loading) {
     return (
-      <div className="min-h-screen bg-stone-950 text-amber-100 flex items-center justify-center">
+      <div className="min-h-screen bg-stone-950 text-amber-100 flex items-center justify-center text-sm">
         Memuat Imperial Mahjong...
       </div>
     );
@@ -273,12 +332,12 @@ export default function MahjongApp() {
   if (!profile) {
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_center,#1c1917_0%,#09090b_100%)] text-stone-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-stone-900/90 border border-amber-500/30 rounded-2xl p-6 shadow-2xl">
-          <div className="text-center mb-6">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-emerald-900/60 border border-amber-400/40 text-3xl mb-3">
+        <div className="w-full max-w-md bg-stone-900/90 border border-amber-500/30 rounded-2xl p-5 sm:p-6 shadow-2xl">
+          <div className="text-center mb-5">
+            <div className="inline-flex items-center justify-center w-12 h-12 sm:w-14 sm:h-14 rounded-xl bg-emerald-900/60 border border-amber-400/40 text-2xl sm:text-3xl mb-2.5">
               🀄
             </div>
-            <h1 className="text-2xl font-bold text-amber-300 tracking-wide">
+            <h1 className="text-xl sm:text-2xl font-bold text-amber-300 tracking-wide">
               IMPERIAL MAHJONG
             </h1>
             <p className="text-xs text-stone-400 mt-1">
@@ -286,7 +345,7 @@ export default function MahjongApp() {
             </p>
           </div>
 
-          <div className="grid grid-cols-3 gap-1 bg-stone-950 p-1 rounded-lg mb-5 text-xs font-medium">
+          <div className="grid grid-cols-3 gap-1 bg-stone-950 p-1 rounded-lg mb-4 text-xs font-medium">
             {(['guest', 'login', 'register'] as const).map((tab) => (
               <button
                 key={tab}
@@ -324,7 +383,7 @@ export default function MahjongApp() {
                 </label>
                 <input
                   type="text"
-                  placeholder="User"
+                  placeholder="Masukkan nama panggilan..."
                   value={usernameInput}
                   onChange={(e) => setUsernameInput(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-lg bg-stone-950 border border-stone-700 text-sm focus:border-amber-400 outline-none"
@@ -393,45 +452,45 @@ export default function MahjongApp() {
     );
   }
 
-  // TAMPILAN 2: MEJA PERMAINAN 3D FIRST-PERSON POV
+  // TAMPILAN 2: MEJA PERMAINAN 3D MULTIPLAYER REAL-TIME
   if (isPlaying && activeRoom) {
     return (
       <MahjongTable
         profile={profile}
         room={activeRoom}
         players={roomPlayers}
-        onExitRoom={() => {
-          setIsPlaying(false);
-          setActiveRoom(null);
-          fetchLeaderboard();
-        }}
+        onExitRoom={leaveRoom}
         onProfileUpdated={checkSession}
       />
     );
   }
 
+  const isHost = activeRoom ? activeRoom.host_id === profile.id : false;
+
   // TAMPILAN 3: LOBBY UTAMA & WAITING ROOM REAL-TIME
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,#1c1917_0%,#09090b_100%)] text-stone-100 p-6">
-      <div className="max-w-3xl mx-auto space-y-6">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,#1c1917_0%,#09090b_100%)] text-stone-100 p-3 sm:p-6">
+      <div className="max-w-3xl mx-auto space-y-4 sm:space-y-6">
         {/* Header Profil & Rank */}
-        <div className="flex flex-wrap items-center justify-between gap-4 bg-stone-900 border border-amber-500/20 p-4 rounded-xl shadow-lg">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-full bg-amber-500/20 border border-amber-400 flex items-center justify-center font-bold text-amber-300">
+        <div className="flex items-center justify-between gap-3 bg-stone-900 border border-amber-500/20 p-3.5 sm:p-4 rounded-xl shadow-lg">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-full bg-amber-500/20 border border-amber-400 flex items-center justify-center font-bold text-amber-300 text-sm">
               {profile.username.slice(0, 2).toUpperCase()}
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-white">{profile.username}</span>
+            <div className="truncate">
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-white text-sm sm:text-base truncate">
+                  {profile.username}
+                </span>
                 {profile.is_guest && (
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-stone-800 text-stone-400">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-800 text-stone-400 shrink-0">
                     GUEST
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-2 text-xs text-amber-300 mt-0.5">
-                <Crown className="w-3.5 h-3.5" />
-                <span>
+              <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-amber-300 mt-0.5">
+                <Crown className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
                   {profile.rank_tier} • {profile.rank_points} RP ({profile.wins}W /{' '}
                   {profile.matches_played}M)
                 </span>
@@ -441,38 +500,39 @@ export default function MahjongApp() {
 
           <button
             onClick={handleLogout}
-            className="px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-red-950 text-xs text-stone-300 hover:text-red-300 flex items-center gap-1.5 transition"
+            className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-red-950 text-xs text-stone-300 hover:text-red-300 flex items-center gap-1.5 shrink-0 transition"
           >
-            <LogOut className="w-3.5 h-3.5" /> Keluar
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Keluar</span>
           </button>
         </div>
 
         {/* Jika Belum Masuk Room -> Pilih Mode */}
         {!activeRoom ? (
           <>
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="bg-emerald-950/40 border border-emerald-500/30 p-5 rounded-xl space-y-4 flex flex-col justify-between">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-emerald-950/40 border border-emerald-500/30 p-4 sm:p-5 rounded-xl space-y-4 flex flex-col justify-between">
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-emerald-300 font-bold">
+                  <div className="flex items-center gap-2 text-emerald-300 font-bold text-sm sm:text-base">
                     <Crown className="w-5 h-5" />
                     <h2>Ranked Competitive</h2>
                   </div>
                   <p className="text-xs text-stone-300 leading-relaxed">
                     Kumpulkan Rank Points (RP) untuk naik dari tier Bronze
-                    hingga Master. Kursi kosong otomatis diisi Bot AI jika
-                    matchmaking belum penuh.
+                    hingga Master. Kursi kosong otomatis diisi Bot AI saat host
+                    memulai pertandingan.
                   </p>
                 </div>
                 <button
                   onClick={() => createRoom('ranked')}
                   className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-bold text-sm transition flex items-center justify-center gap-2"
                 >
-                  <Sparkles className="w-4 h-4" /> Cari Match Ranked
+                  <Sparkles className="w-4 h-4" /> Buat Match Ranked
                 </button>
               </div>
 
-              <div className="bg-stone-900 border border-amber-500/30 p-5 rounded-xl space-y-4">
-                <div className="flex items-center gap-2 text-amber-300 font-bold">
+              <div className="bg-stone-900 border border-amber-500/30 p-4 sm:p-5 rounded-xl space-y-3.5">
+                <div className="flex items-center gap-2 text-amber-300 font-bold text-sm sm:text-base">
                   <Users className="w-5 h-5" />
                   <h2>Private Room Mabar</h2>
                 </div>
@@ -491,11 +551,11 @@ export default function MahjongApp() {
                     onChange={(e) =>
                       setRoomCodeInput(e.target.value.toUpperCase())
                     }
-                    className="flex-1 px-3 py-2 rounded-lg bg-stone-950 border border-stone-700 text-sm uppercase tracking-widest"
+                    className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-stone-950 border border-stone-700 text-sm uppercase tracking-widest"
                   />
                   <button
                     onClick={joinPrivateRoom}
-                    className="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm font-semibold"
+                    className="px-4 py-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-sm font-semibold shrink-0"
                   >
                     Gabung
                   </button>
@@ -505,7 +565,7 @@ export default function MahjongApp() {
 
             {/* Papan Peringkat Top 5 */}
             {leaderboard.length > 0 && (
-              <div className="bg-stone-900/80 border border-stone-800 rounded-xl p-5">
+              <div className="bg-stone-900/80 border border-stone-800 rounded-xl p-4 sm:p-5">
                 <div className="flex items-center gap-2 text-amber-300 font-bold text-sm mb-3">
                   <Trophy className="w-4 h-4" />
                   <h3>Top 5 Peringkat Global</h3>
@@ -514,17 +574,17 @@ export default function MahjongApp() {
                   {leaderboard.map((item, idx) => (
                     <div
                       key={item.id}
-                      className="py-2.5 flex items-center justify-between"
+                      className="py-2.5 flex items-center justify-between gap-2"
                     >
-                      <div className="flex items-center gap-3">
-                        <span className="w-5 text-center font-bold text-stone-400">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-5 text-center font-bold text-stone-400 shrink-0">
                           #{idx + 1}
                         </span>
-                        <span className="font-semibold text-stone-200">
+                        <span className="font-semibold text-stone-200 truncate">
                           {item.username}
                         </span>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 shrink-0">
                         <span className="px-2 py-0.5 rounded bg-stone-800 text-amber-300">
                           {item.rank_tier}
                         </span>
@@ -540,12 +600,12 @@ export default function MahjongApp() {
           </>
         ) : (
           /* Waiting Room Real-Time */
-          <div className="bg-stone-900 border border-amber-500/30 p-6 rounded-xl space-y-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="bg-stone-900 border border-amber-500/30 p-4 sm:p-6 rounded-xl space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <span className="text-xs text-stone-400">
                   Kode {activeRoom.type === 'ranked' ? 'Ranked' : 'Private'}{' '}
-                  Room
+                  Room (Bagikan ke Teman)
                 </span>
                 <div className="flex items-center gap-2 mt-1">
                   <span className="text-2xl font-mono font-bold text-amber-300 tracking-widest">
@@ -557,7 +617,8 @@ export default function MahjongApp() {
                       setCopied(true);
                       setTimeout(() => setCopied(false), 2000);
                     }}
-                    className="p-1.5 rounded bg-stone-800 hover:bg-stone-700 text-stone-300"
+                    className="p-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300"
+                    title="Salin Kode Room"
                   >
                     {copied ? (
                       <Check className="w-4 h-4 text-emerald-400" />
@@ -570,21 +631,28 @@ export default function MahjongApp() {
 
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setActiveRoom(null)}
+                  onClick={leaveRoom}
                   className="px-4 py-2.5 rounded-lg bg-stone-800 hover:bg-stone-700 text-xs font-semibold text-stone-300"
                 >
-                  Batal
+                  Keluar Room
                 </button>
-                <button
-                  onClick={startMatchWithBots}
-                  className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-bold text-sm"
-                >
-                  Mulai Game (Isi Bot Jika Kosong)
-                </button>
+
+                {isHost ? (
+                  <button
+                    onClick={startMatchAsHost}
+                    className="flex-1 sm:flex-initial px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-bold text-xs sm:text-sm"
+                  >
+                    Mulai Game (Isi Bot Jika Kosong)
+                  </button>
+                ) : (
+                  <div className="px-4 py-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-amber-300 text-xs font-medium animate-pulse">
+                    Menunggu Host memulai...
+                  </div>
+                )}
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
               {[
                 'East (Timur)',
                 'South (Selatan)',
@@ -605,9 +673,9 @@ export default function MahjongApp() {
                       {wind}
                     </div>
                     {occupant ? (
-                      <div className="font-semibold text-sm text-amber-200 flex items-center justify-center gap-1">
-                        <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>
+                      <div className="font-semibold text-xs sm:text-sm text-amber-200 flex items-center justify-center gap-1 truncate">
+                        <UserCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="truncate">
                           {occupant.is_bot
                             ? occupant.bot_name
                             : occupant.profiles?.username}
