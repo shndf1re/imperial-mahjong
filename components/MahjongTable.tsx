@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase, UserProfile } from '@/lib/supabase';
-import { ArrowLeft, RotateCcw, Sparkles, Eye, Trophy } from 'lucide-react';
+import { ArrowLeft, RotateCcw, Sparkles, Eye, Trophy, Dices } from 'lucide-react';
 
 export interface Tile {
   id: string;
@@ -19,6 +19,13 @@ interface Meld {
   fromSeat?: number;
 }
 
+interface DiceRollInfo {
+  phase: 'rolling' | 'playing';
+  rolls: Record<string, number[]>; // seatIndex -> [d1, d2, d3]
+  startingSeat: number;
+  wallBreakStack: number;
+}
+
 interface GameStatePayload {
   wall: Tile[];
   hands: Record<string, Tile[]>;
@@ -26,6 +33,7 @@ interface GameStatePayload {
   discards: Tile[];
   turn: number;
   mustDraw: boolean;
+  diceInfo: DiceRollInfo;
   winnerInfo: {
     seat: number;
     name: string;
@@ -46,6 +54,14 @@ const WIND_KANJI = ['東', '南', '西', '北'];
 const WIND_NAMES = ['East', 'South', 'West', 'North'];
 const DRAGON_KANJI = ['中', '發', '白'];
 const DRAGON_NAMES = ['Red Dragon', 'Green Dragon', 'White Dragon'];
+
+function rollThreeDice(): number[] {
+  return [
+    Math.floor(Math.random() * 6) + 1,
+    Math.floor(Math.random() * 6) + 1,
+    Math.floor(Math.random() * 6) + 1,
+  ];
+}
 
 function generateDeck(): Tile[] {
   const deck: Tile[] = [];
@@ -177,7 +193,6 @@ function canWin(hand: Tile[], meldCount: number): boolean {
 
 /* KOMPONEN VISUAL BATU MAHJONG KLASIK (DOTS, BAMBOO, SYMBOLS, WINDS, DRAGONS) */
 function TileFace({ tile }: { tile: Tile }) {
-  // 1. SUIT: SYMBOLS (MAN / WAN) -> Angka Biru di atas + 萬 Merah di bawah
   if (tile.suit === 'man') {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center leading-none py-0.5">
@@ -191,7 +206,6 @@ function TileFace({ tile }: { tile: Tile }) {
     );
   }
 
-  // 2. SUIT: DOTS (PIN) -> Ilustrasi Lingkaran Warna-Warni Klasik
   if (tile.suit === 'pin') {
     const dotLayouts: Record<
       number,
@@ -289,7 +303,6 @@ function TileFace({ tile }: { tile: Tile }) {
     );
   }
 
-  // 3. SUIT: BAMBOO (SOU) -> Batang Bambu Beruas Hijau & Merah
   if (tile.suit === 'sou') {
     const sticks: Record<
       number,
@@ -394,7 +407,6 @@ function TileFace({ tile }: { tile: Tile }) {
     );
   }
 
-  // 4. WINDS -> Kanji Biru Klasik
   if (tile.suit === 'wind') {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -405,7 +417,6 @@ function TileFace({ tile }: { tile: Tile }) {
     );
   }
 
-  // 5. DRAGONS -> Red (中), Green (發), White (Bingkai Biru Klasik)
   if (tile.value === 1) {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -448,6 +459,7 @@ export default function MahjongTable({
   const [gameState, setGameState] = useState<GameStatePayload | null>(null);
   const gameStateRef = useRef<GameStatePayload | null>(null);
   const livePlayersRef = useRef<any[]>(players);
+  const botBusyRef = useRef<boolean>(false);
 
   useEffect(() => {
     gameStateRef.current = gameState;
@@ -506,6 +518,7 @@ export default function MahjongTable({
         player_melds: nextState.melds,
         round_wind: JSON.stringify({
           mustDraw: nextState.mustDraw,
+          diceInfo: nextState.diceInfo,
           winnerInfo: nextState.winnerInfo,
         }),
         updated_at: new Date().toISOString(),
@@ -515,12 +528,27 @@ export default function MahjongTable({
   );
 
   const parseDbRow = useCallback((row: any): GameStatePayload => {
-    let meta = { mustDraw: true, winnerInfo: null };
+    let meta: {
+      mustDraw: boolean;
+      diceInfo?: DiceRollInfo;
+      winnerInfo: any;
+    } = {
+      mustDraw: true,
+      winnerInfo: null,
+    };
     try {
       if (row.round_wind && row.round_wind.startsWith('{')) {
         meta = JSON.parse(row.round_wind);
       }
     } catch {}
+
+    const defaultDice: DiceRollInfo = {
+      phase: 'playing',
+      rolls: {},
+      startingSeat: row.current_turn ?? 0,
+      wallBreakStack: 8,
+    };
+
     return {
       wall: row.wall_tiles || [],
       hands: row.player_hands || { '0': [], '1': [], '2': [], '3': [] },
@@ -528,16 +556,37 @@ export default function MahjongTable({
       discards: row.discard_pile || [],
       turn: row.current_turn ?? 0,
       mustDraw: meta.mustDraw,
+      diceInfo: meta.diceInfo || defaultDice,
       winnerInfo: meta.winnerInfo,
     };
   }, []);
 
+  // Inisialisasi ronde baru dengan FASE LEMPAR DADU (Dice Roll)
   const initRound = useCallback(async () => {
     recordedWinRef.current = null;
     lastDiscardCountRef.current = 0;
+    botBusyRef.current = false;
     setRpChangeShown(null);
     setClaimOptions(null);
     setDrawnTileId(null);
+
+    const { data: latestP } = await supabase
+      .from('room_players')
+      .select('*, profiles(username, rank_tier, rank_points)')
+      .eq('room_id', room.id)
+      .order('seat_index', { ascending: true });
+
+    const pList = latestP || livePlayersRef.current;
+    if (latestP) setLivePlayers(latestP);
+
+    // Bot otomatis langsung melempar 3 dadu; pemain manusia melempar dadunya sendiri
+    const initialRolls: Record<string, number[]> = {};
+    [0, 1, 2, 3].forEach((seatIdx) => {
+      const p = pList.find((item) => item.seat_index === seatIdx);
+      if (!p || p.is_bot) {
+        initialRolls[String(seatIdx)] = rollThreeDice();
+      }
+    });
 
     const deck = generateDeck();
     const hands: Record<string, Tile[]> = {
@@ -554,11 +603,101 @@ export default function MahjongTable({
       discards: [],
       turn: 0,
       mustDraw: true,
+      diceInfo: {
+        phase: 'rolling',
+        rolls: initialRolls,
+        startingSeat: 0,
+        wallBreakStack: 0,
+      },
       winnerInfo: null,
     };
 
     await pushStateToSupabase(freshState);
-  }, [pushStateToSupabase]);
+  }, [room.id, pushStateToSupabase]);
+
+  // Pemain manusia melempar 3 dadu
+  const handlePlayerRollDice = async () => {
+    if (!gameState || gameState.diceInfo.phase !== 'rolling') return;
+    if (gameState.diceInfo.rolls[String(mySeat)]) return;
+
+    playTileClick();
+    const myRoll = rollThreeDice();
+    const updatedRolls = {
+      ...gameState.diceInfo.rolls,
+      [String(mySeat)]: myRoll,
+    };
+
+    // Cek apakah keempat kursi sudah melempar dadu
+    const allRolled = [0, 1, 2, 3].every((s) => Boolean(updatedRolls[String(s)]));
+
+    if (!allRolled) {
+      await pushStateToSupabase({
+        ...gameState,
+        diceInfo: {
+          ...gameState.diceInfo,
+          rolls: updatedRolls,
+        },
+      });
+    } else {
+      // Hitung pemenang dadu (skor tertinggi jalan duluan + potong dinding)
+      let bestSeat = 0;
+      let highestSum = -1;
+      [0, 1, 2, 3].forEach((s) => {
+        const sum = (updatedRolls[String(s)] || [0, 0, 0]).reduce(
+          (a, b) => a + b,
+          0
+        );
+        if (sum > highestSum) {
+          highestSum = sum;
+          bestSeat = s;
+        }
+      });
+
+      // Potong tumpukan dinding sesuai total mata dadu pemenang
+      const cutWall = [...gameState.wall];
+      const cutOffset = highestSum % Math.max(1, cutWall.length);
+      const rotatedWall = [
+        ...cutWall.slice(cutOffset),
+        ...cutWall.slice(0, cutOffset),
+      ];
+
+      await pushStateToSupabase({
+        ...gameState,
+        wall: rotatedWall,
+        turn: bestSeat,
+        mustDraw: true,
+        diceInfo: {
+          phase: 'rolling', // Tampilkan hasil akhir dadu selama 2.5 detik sebelum mulai
+          rolls: updatedRolls,
+          startingSeat: bestSeat,
+          wallBreakStack: highestSum,
+        },
+      });
+    }
+  };
+
+  // Transisi otomatis dari hasil dadu lengkap ke Meja Permainan (dijalankan Host)
+  useEffect(() => {
+    if (!isHost || !gameState || gameState.diceInfo.phase !== 'rolling') return;
+    const allRolled = [0, 1, 2, 3].every((s) =>
+      Boolean(gameState.diceInfo.rolls[String(s)])
+    );
+    if (!allRolled) return;
+
+    const timer = setTimeout(async () => {
+      const latest = gameStateRef.current;
+      if (!latest || latest.diceInfo.phase !== 'rolling') return;
+      await pushStateToSupabase({
+        ...latest,
+        diceInfo: {
+          ...latest.diceInfo,
+          phase: 'playing',
+        },
+      });
+    }, 2800);
+
+    return () => clearTimeout(timer);
+  }, [isHost, gameState, pushStateToSupabase]);
 
   // Sinkronisasi Realtime + Polling 1.5 detik
   useEffect(() => {
@@ -579,7 +718,10 @@ export default function MahjongTable({
       ]);
 
       if (!isMounted) return;
-      if (pRows && pRows.length > 0) setLivePlayers(pRows);
+      if (pRows && pRows.length > 0) {
+        setLivePlayers(pRows);
+        livePlayersRef.current = pRows;
+      }
 
       if (stateRow) {
         const parsed = parseDbRow(stateRow);
@@ -658,7 +800,12 @@ export default function MahjongTable({
   }, [gameState, mySeat, profile, room.type, onProfileUpdated]);
 
   useEffect(() => {
-    if (!gameState || gameState.winnerInfo || !gameState.mustDraw) {
+    if (
+      !gameState ||
+      gameState.diceInfo.phase !== 'playing' ||
+      gameState.winnerInfo ||
+      !gameState.mustDraw
+    ) {
       setClaimOptions(null);
       return;
     }
@@ -707,71 +854,102 @@ export default function MahjongTable({
     }
   }, [gameState, mySeat]);
 
-  // FIX ANTI-STUCK: Timer Bot AI tidak akan ter-reset oleh polling 1.5 detik
-  const activeTurn = gameState?.turn;
-  const isRoundOver = Boolean(gameState?.winnerInfo);
-
+  // ENGINE BOT ANTI-STUCK: Berjalan di atas interval pengawas yang tidak pernah mati
   useEffect(() => {
-    if (!isHost || activeTurn === undefined || isRoundOver) return;
+    if (!isHost) return;
 
-    const currentSeatObj = livePlayersRef.current.find(
-      (p) => p.seat_index === activeTurn
-    );
-    if (!currentSeatObj || !currentSeatObj.is_bot) return;
-
-    const timer = setTimeout(async () => {
+    const botWatchdog = setInterval(async () => {
       const latest = gameStateRef.current;
-      if (!latest || latest.winnerInfo || latest.turn !== activeTurn) return;
-
-      if (latest.wall.length === 0) {
-        await pushStateToSupabase({
-          ...latest,
-          winnerInfo: {
-            seat: -1,
-            name: 'Draw Game (Dinding Habis)',
-            faan: 0,
-          },
-        });
+      if (
+        !latest ||
+        latest.diceInfo.phase !== 'playing' ||
+        latest.winnerInfo ||
+        botBusyRef.current
+      ) {
         return;
       }
 
-      const nextWall = [...latest.wall];
-      const drawn = nextWall.pop()!;
-      const seatKey = String(activeTurn);
-      const botHand = [...(latest.hands[seatKey] || []), drawn];
-      const botMelds = latest.melds[seatKey] || [];
+      const currentSeatObj = livePlayersRef.current.find(
+        (p) => p.seat_index === latest.turn
+      );
+      if (!currentSeatObj || !currentSeatObj.is_bot) return;
 
-      if (canWin(botHand, botMelds.length)) {
-        const botName = currentSeatObj.bot_name || `Bot ${activeTurn + 1}`;
-        await pushStateToSupabase({
-          ...latest,
-          wall: nextWall,
-          hands: { ...latest.hands, [seatKey]: sortHand(botHand) },
-          winnerInfo: { seat: activeTurn, name: botName, faan: 2 },
-        });
-        return;
-      }
+      botBusyRef.current = true;
+      const activeTurn = latest.turn;
 
-      const discardIdx = Math.floor(Math.random() * botHand.length);
-      const discarded = botHand[discardIdx];
-      const remaining = sortHand(botHand.filter((_, i) => i !== discardIdx));
+      // Jeda 2.2 detik agar tidak terlalu cepat, lalu eksekusi langkah Bot
+      setTimeout(async () => {
+        try {
+          const fresh = gameStateRef.current;
+          if (
+            !fresh ||
+            fresh.diceInfo.phase !== 'playing' ||
+            fresh.winnerInfo ||
+            fresh.turn !== activeTurn
+          ) {
+            botBusyRef.current = false;
+            return;
+          }
 
-      await pushStateToSupabase({
-        ...latest,
-        wall: nextWall,
-        hands: { ...latest.hands, [seatKey]: remaining },
-        discards: [...latest.discards, discarded],
-        turn: (activeTurn + 1) % 4,
-        mustDraw: true,
-      });
-    }, 2400);
+          if (fresh.wall.length === 0) {
+            await pushStateToSupabase({
+              ...fresh,
+              winnerInfo: {
+                seat: -1,
+                name: 'Draw Game (Dinding Habis)',
+                faan: 0,
+              },
+            });
+            botBusyRef.current = false;
+            return;
+          }
 
-    return () => clearTimeout(timer);
-  }, [isHost, activeTurn, isRoundOver, pushStateToSupabase]);
+          const nextWall = [...fresh.wall];
+          const drawn = nextWall.pop()!;
+          const seatKey = String(activeTurn);
+          const botHand = [...(fresh.hands[seatKey] || []), drawn];
+          const botMelds = fresh.melds[seatKey] || [];
+
+          if (canWin(botHand, botMelds.length)) {
+            const botName =
+              currentSeatObj.bot_name || `Bot ${activeTurn + 1}`;
+            await pushStateToSupabase({
+              ...fresh,
+              wall: nextWall,
+              hands: { ...fresh.hands, [seatKey]: sortHand(botHand) },
+              winnerInfo: { seat: activeTurn, name: botName, faan: 2 },
+            });
+            botBusyRef.current = false;
+            return;
+          }
+
+          const discardIdx = Math.floor(Math.random() * botHand.length);
+          const discarded = botHand[discardIdx];
+          const remaining = sortHand(
+            botHand.filter((_, i) => i !== discardIdx)
+          );
+
+          await pushStateToSupabase({
+            ...fresh,
+            wall: nextWall,
+            hands: { ...fresh.hands, [seatKey]: remaining },
+            discards: [...fresh.discards, discarded],
+            turn: (activeTurn + 1) % 4,
+            mustDraw: true,
+          });
+        } finally {
+          botBusyRef.current = false;
+        }
+      }, 2200);
+    }, 600);
+
+    return () => clearInterval(botWatchdog);
+  }, [isHost, pushStateToSupabase]);
 
   const handleManualDraw = async () => {
     if (
       !gameState ||
+      gameState.diceInfo.phase !== 'playing' ||
       gameState.turn !== mySeat ||
       !gameState.mustDraw ||
       gameState.winnerInfo
@@ -806,6 +984,7 @@ export default function MahjongTable({
   const handleDiscard = async (tile: Tile) => {
     if (
       !gameState ||
+      gameState.diceInfo.phase !== 'playing' ||
       gameState.turn !== mySeat ||
       gameState.mustDraw ||
       claimOptions ||
@@ -930,9 +1109,14 @@ export default function MahjongTable({
     });
   }
 
+  const allDiceRolled = [0, 1, 2, 3].every((s) =>
+    Boolean(gameState.diceInfo.rolls[String(s)])
+  );
+  const myDiceRoll = gameState.diceInfo.rolls[String(mySeat)];
+
   return (
     <div className="min-h-[100dvh] bg-[radial-gradient(circle_at_center,#291d14_0%,#090705_100%)] text-stone-100 flex flex-col justify-between overflow-x-hidden select-none">
-      {/* HUD ATAS RESPONSIF */}
+      {/* HUD ATAS */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2 bg-black/60 border-b border-amber-500/20 backdrop-blur-sm z-20">
         <div className="flex items-center gap-2">
           <button
@@ -952,13 +1136,17 @@ export default function MahjongTable({
             <strong className="text-amber-300">{gameState.wall.length}</strong>
           </span>
           <span
-            className={`px-2 py-1 rounded border font-semibold truncate max-w-[170px] sm:max-w-none ${
-              gameState.turn === mySeat
+            className={`px-2 py-1 rounded border font-semibold truncate max-w-[175px] sm:max-w-none ${
+              gameState.diceInfo.phase === 'rolling'
+                ? 'bg-purple-950 border-purple-500/40 text-purple-200'
+                : gameState.turn === mySeat
                 ? 'bg-amber-500 text-stone-950 border-amber-300'
                 : 'bg-emerald-950 border-emerald-500/40 text-emerald-300'
             }`}
           >
-            {gameState.turn === mySeat
+            {gameState.diceInfo.phase === 'rolling'
+              ? 'Fase Lempar Dadu'
+              : gameState.turn === mySeat
               ? 'Giliran Anda!'
               : `${getSeatName(gameState.turn)}${
                   isBotThinking ? ' berpikir...' : ''
@@ -978,7 +1166,8 @@ export default function MahjongTable({
           <div className="flex flex-col items-center gap-1">
             <div
               className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs border ${
-                gameState.turn === topSeat
+                gameState.turn === topSeat &&
+                gameState.diceInfo.phase === 'playing'
                   ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                   : 'bg-black/50 text-stone-300 border-stone-700'
               }`}
@@ -1001,7 +1190,8 @@ export default function MahjongTable({
             <div className="flex flex-col items-center gap-1.5 shrink-0">
               <div
                 className={`px-1.5 sm:px-2.5 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[70px] sm:max-w-none truncate ${
-                  gameState.turn === leftSeat
+                  gameState.turn === leftSeat &&
+                  gameState.diceInfo.phase === 'playing'
                     ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                     : 'bg-black/50 text-stone-300 border-stone-700'
                 }`}
@@ -1018,34 +1208,99 @@ export default function MahjongTable({
               </div>
             </div>
 
-            {/* Kolam Tengah (Discard Pile) dengan Visual Batu Klasik */}
-            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[145px] sm:min-h-[185px] max-h-[220px] overflow-y-auto bg-black/25 border border-emerald-400/15 rounded-xl p-1.5 sm:p-2.5 flex flex-wrap content-start gap-1 shadow-inner">
-              {gameState.discards.length === 0 && (
-                <div className="w-full h-32 flex items-center justify-center text-[11px] text-emerald-200/30 italic text-center">
-                  Kolam Buangan Tengah Meja
+            {/* Kolam Tengah / Overlay Lempar Dadu */}
+            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[155px] sm:min-h-[195px] max-h-[230px] overflow-y-auto bg-black/30 border border-emerald-400/20 rounded-xl p-2 sm:p-3 flex flex-wrap content-start gap-1 shadow-inner relative">
+              {gameState.diceInfo.phase === 'rolling' ? (
+                <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-2.5 py-1">
+                  <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs sm:text-sm">
+                    <Dices className="w-4 h-4" />
+                    <span>Lempar Dadu Penentu Giliran & Potong Dinding</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-1.5 w-full text-[11px]">
+                    {[0, 1, 2, 3].map((s) => {
+                      const r = gameState.diceInfo.rolls[String(s)];
+                      const total = r ? r.reduce((a, b) => a + b, 0) : 0;
+                      const isWinner =
+                        allDiceRolled && gameState.diceInfo.startingSeat === s;
+                      return (
+                        <div
+                          key={s}
+                          className={`p-1.5 rounded border ${
+                            isWinner
+                              ? 'bg-amber-500/20 border-amber-400 text-amber-200 font-bold'
+                              : 'bg-stone-900/80 border-stone-700 text-stone-300'
+                          }`}
+                        >
+                          <div className="truncate text-[10px]">
+                            {WIND_KANJI[s]} {getSeatName(s)}
+                          </div>
+                          {r ? (
+                            <div className="font-mono text-xs mt-0.5 text-emerald-300">
+                              🎲 {r.join('-')} = <strong>{total}</strong>
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-stone-500 italic mt-0.5">
+                              Belum lempar...
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {!myDiceRoll ? (
+                    <button
+                      onClick={handlePlayerRollDice}
+                      className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs shadow-lg animate-bounce"
+                    >
+                      🎲 Lempar 3 Dadu Sekarang
+                    </button>
+                  ) : allDiceRolled ? (
+                    <div className="text-[11px] text-emerald-300 font-semibold">
+                      Dinding dipotong pada urutan ke-
+                      {gameState.diceInfo.wallBreakStack} •{' '}
+                      {getSeatName(gameState.diceInfo.startingSeat)} jalan
+                      duluan!
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-stone-400">
+                      Menunggu pemain lain melempar dadu...
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <>
+                  {gameState.discards.length === 0 && (
+                    <div className="w-full h-32 flex items-center justify-center text-[11px] text-emerald-200/30 italic text-center">
+                      Kolam Buangan Tengah Meja (Dinding dipotong #
+                      {gameState.diceInfo.wallBreakStack})
+                    </div>
+                  )}
+                  {gameState.discards.map((tile, idx) => (
+                    <button
+                      key={`${tile.id}_${idx}`}
+                      onClick={() => setInspectedTile(tile)}
+                      onMouseEnter={() => setInspectedTile(tile)}
+                      className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#faf6eb] to-[#e9dec4] border border-stone-400 border-b-2 border-b-stone-500 shadow flex items-center justify-center hover:scale-110 transition overflow-hidden ${
+                        idx === gameState.discards.length - 1
+                          ? 'ring-2 ring-amber-400'
+                          : ''
+                      }`}
+                    >
+                      <TileFace tile={tile} />
+                    </button>
+                  ))}
+                </>
               )}
-              {gameState.discards.map((tile, idx) => (
-                <button
-                  key={`${tile.id}_${idx}`}
-                  onClick={() => setInspectedTile(tile)}
-                  onMouseEnter={() => setInspectedTile(tile)}
-                  className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#faf6eb] to-[#e9dec4] border border-stone-400 border-b-2 border-b-stone-500 shadow flex items-center justify-center hover:scale-110 transition overflow-hidden ${
-                    idx === gameState.discards.length - 1
-                      ? 'ring-2 ring-amber-400'
-                      : ''
-                  }`}
-                >
-                  <TileFace tile={tile} />
-                </button>
-              ))}
             </div>
 
             {/* Lawan Kanan */}
             <div className="flex flex-col items-center gap-1.5 shrink-0">
               <div
                 className={`px-1.5 sm:px-2.5 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[70px] sm:max-w-none truncate ${
-                  gameState.turn === rightSeat
+                  gameState.turn === rightSeat &&
+                  gameState.diceInfo.phase === 'playing'
                     ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                     : 'bg-black/50 text-stone-300 border-stone-700'
                 }`}
@@ -1070,6 +1325,7 @@ export default function MahjongTable({
                 const isDrawn = tile.id === drawnTileId;
                 const isHighlighted = highlightedIds.has(tile.id);
                 const canClickDiscard =
+                  gameState.diceInfo.phase === 'playing' &&
                   gameState.turn === mySeat &&
                   !gameState.mustDraw &&
                   !claimOptions &&
@@ -1138,7 +1394,8 @@ export default function MahjongTable({
         </div>
 
         <div className="flex flex-wrap items-center justify-center sm:justify-end gap-2 w-full sm:w-auto">
-          {gameState.turn === mySeat &&
+          {gameState.diceInfo.phase === 'playing' &&
+            gameState.turn === mySeat &&
             gameState.mustDraw &&
             !claimOptions &&
             !gameState.winnerInfo && (
@@ -1150,7 +1407,8 @@ export default function MahjongTable({
               </button>
             )}
 
-          {gameState.turn === mySeat &&
+          {gameState.diceInfo.phase === 'playing' &&
+            gameState.turn === mySeat &&
             !gameState.mustDraw &&
             !gameState.winnerInfo && (
               <span className="text-xs text-amber-300 font-medium text-center">
@@ -1158,14 +1416,16 @@ export default function MahjongTable({
               </span>
             )}
 
-          {playerCanHu && !gameState.winnerInfo && (
-            <button
-              onClick={declareWin}
-              className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-sm shadow-lg animate-bounce"
-            >
-              🀄 HU (MENANG)!
-            </button>
-          )}
+          {gameState.diceInfo.phase === 'playing' &&
+            playerCanHu &&
+            !gameState.winnerInfo && (
+              <button
+                onClick={declareWin}
+                className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-sm shadow-lg animate-bounce"
+              >
+                🀄 HU (MENANG)!
+              </button>
+            )}
 
           {claimOptions && (
             <div className="flex flex-wrap items-center justify-center gap-1.5 bg-stone-900 border border-amber-400/50 px-2.5 py-1.5 rounded-xl w-full sm:w-auto">
