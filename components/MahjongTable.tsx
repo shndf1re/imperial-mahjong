@@ -1288,13 +1288,13 @@ export default function MahjongTable({
     const currentRound = latest.roundNumber ?? 1;
     const winSeat = latest.winnerInfo.seat;
     const winFaan = latest.winnerInfo.faan;
-    const updatedScores = {
-      '0': 0,
-      '1': 0,
-      '2': 0,
-      '3': 0,
-      ...(latest.sessionScores || {}),
-    };
+    const updatedScores: Record<string, number> = {
+  '0': 0,
+  '1': 0,
+  '2': 0,
+  '3': 0,
+  ...(latest.sessionScores || {}),
+};
 
     if (winSeat >= 0) {
       const gained = 10 + winFaan * 5;
