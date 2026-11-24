@@ -324,7 +324,7 @@ export default function MahjongApp() {
                 </label>
                 <input
                   type="text"
-                  placeholder="Contoh: Shandy_MJ"
+                  placeholder="User"
                   value={usernameInput}
                   onChange={(e) => setUsernameInput(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-lg bg-stone-950 border border-stone-700 text-sm focus:border-amber-400 outline-none"
