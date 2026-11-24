@@ -21,7 +21,7 @@ interface Meld {
 
 interface DiceRollInfo {
   phase: 'rolling' | 'playing';
-  rolls: Record<string, number[]>; // seatIndex -> [d1, d2, d3]
+  rolls: Record<string, number[]>;
   startingSeat: number;
   wallBreakStack: number;
 }
@@ -579,7 +579,6 @@ export default function MahjongTable({
     const pList = latestP || livePlayersRef.current;
     if (latestP) setLivePlayers(latestP);
 
-    // Bot otomatis langsung melempar 3 dadu; pemain manusia melempar dadunya sendiri
     const initialRolls: Record<string, number[]> = {};
     [0, 1, 2, 3].forEach((seatIdx) => {
       const p = pList.find((item) => item.seat_index === seatIdx);
@@ -627,7 +626,6 @@ export default function MahjongTable({
       [String(mySeat)]: myRoll,
     };
 
-    // Cek apakah keempat kursi sudah melempar dadu
     const allRolled = [0, 1, 2, 3].every((s) => Boolean(updatedRolls[String(s)]));
 
     if (!allRolled) {
@@ -639,7 +637,6 @@ export default function MahjongTable({
         },
       });
     } else {
-      // Hitung pemenang dadu (skor tertinggi jalan duluan + potong dinding)
       let bestSeat = 0;
       let highestSum = -1;
       [0, 1, 2, 3].forEach((s) => {
@@ -653,7 +650,6 @@ export default function MahjongTable({
         }
       });
 
-      // Potong tumpukan dinding sesuai total mata dadu pemenang
       const cutWall = [...gameState.wall];
       const cutOffset = highestSum % Math.max(1, cutWall.length);
       const rotatedWall = [
@@ -667,7 +663,7 @@ export default function MahjongTable({
         turn: bestSeat,
         mustDraw: true,
         diceInfo: {
-          phase: 'rolling', // Tampilkan hasil akhir dadu selama 2.5 detik sebelum mulai
+          phase: 'rolling',
           rolls: updatedRolls,
           startingSeat: bestSeat,
           wallBreakStack: highestSum,
@@ -676,13 +672,14 @@ export default function MahjongTable({
     }
   };
 
-  // Transisi otomatis dari hasil dadu lengkap ke Meja Permainan (dijalankan Host)
+  const allDiceRolled = [0, 1, 2, 3].every((s) =>
+    Boolean(gameState?.diceInfo?.rolls?.[String(s)])
+  );
+  const isRollingPhase = gameState?.diceInfo?.phase === 'rolling';
+
+  // Transisi otomatis dari hasil dadu lengkap ke Meja Permainan (anti-reset polling)
   useEffect(() => {
-    if (!isHost || !gameState || gameState.diceInfo.phase !== 'rolling') return;
-    const allRolled = [0, 1, 2, 3].every((s) =>
-      Boolean(gameState.diceInfo.rolls[String(s)])
-    );
-    if (!allRolled) return;
+    if (!isHost || !isRollingPhase || !allDiceRolled) return;
 
     const timer = setTimeout(async () => {
       const latest = gameStateRef.current;
@@ -694,10 +691,10 @@ export default function MahjongTable({
           phase: 'playing',
         },
       });
-    }, 2800);
+    }, 2200);
 
     return () => clearTimeout(timer);
-  }, [isHost, gameState, pushStateToSupabase]);
+  }, [isHost, isRollingPhase, allDiceRolled, pushStateToSupabase]);
 
   // Sinkronisasi Realtime + Polling 1.5 detik
   useEffect(() => {
@@ -877,7 +874,6 @@ export default function MahjongTable({
       botBusyRef.current = true;
       const activeTurn = latest.turn;
 
-      // Jeda 2.2 detik agar tidak terlalu cepat, lalu eksekusi langkah Bot
       setTimeout(async () => {
         try {
           const fresh = gameStateRef.current;
@@ -1109,9 +1105,6 @@ export default function MahjongTable({
     });
   }
 
-  const allDiceRolled = [0, 1, 2, 3].every((s) =>
-    Boolean(gameState.diceInfo.rolls[String(s)])
-  );
   const myDiceRoll = gameState.diceInfo.rolls[String(mySeat)];
 
   return (
@@ -1209,7 +1202,7 @@ export default function MahjongTable({
             </div>
 
             {/* Kolam Tengah / Overlay Lempar Dadu */}
-            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[155px] sm:min-h-[195px] max-h-[230px] overflow-y-auto bg-black/30 border border-emerald-400/20 rounded-xl p-2 sm:p-3 flex flex-wrap content-start gap-1 shadow-inner relative">
+            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[155px] sm:min-h-[195px] max-h-[240px] overflow-y-auto bg-black/30 border border-emerald-400/20 rounded-xl p-2 sm:p-3 flex flex-wrap content-start gap-1 shadow-inner relative">
               {gameState.diceInfo.phase === 'rolling' ? (
                 <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-2.5 py-1">
                   <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs sm:text-sm">
@@ -1257,11 +1250,29 @@ export default function MahjongTable({
                       🎲 Lempar 3 Dadu Sekarang
                     </button>
                   ) : allDiceRolled ? (
-                    <div className="text-[11px] text-emerald-300 font-semibold">
-                      Dinding dipotong pada urutan ke-
-                      {gameState.diceInfo.wallBreakStack} •{' '}
-                      {getSeatName(gameState.diceInfo.startingSeat)} jalan
-                      duluan!
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] text-emerald-300 font-semibold">
+                        Dinding dipotong urutan ke-
+                        {gameState.diceInfo.wallBreakStack} •{' '}
+                        {getSeatName(gameState.diceInfo.startingSeat)} jalan
+                        duluan!
+                      </div>
+                      {isHost && (
+                        <button
+                          onClick={() =>
+                            pushStateToSupabase({
+                              ...gameState,
+                              diceInfo: {
+                                ...gameState.diceInfo,
+                                phase: 'playing',
+                              },
+                            })
+                          }
+                          className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow"
+                        >
+                          Masuk ke Meja Permainan →
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="text-[11px] text-stone-400">
