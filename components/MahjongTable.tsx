@@ -14,11 +14,12 @@ import {
   ChevronRight,
   Clock,
   Trash2,
+  Flower2,
 } from 'lucide-react';
 
 export interface Tile {
   id: string;
-  suit: 'man' | 'pin' | 'sou' | 'wind' | 'dragon';
+  suit: 'man' | 'pin' | 'sou' | 'wind' | 'dragon' | 'flower' | 'season';
   value: number;
   label: string;
   sub: string;
@@ -38,16 +39,31 @@ interface DiceRollInfo {
   wallBreakStack: number;
 }
 
+interface ClaimDecision {
+  type: 'WU' | 'KONG' | 'PONG' | 'CHI' | 'PASS';
+  pairTiles?: Tile[];
+}
+
+interface PendingClaimWindow {
+  tile: Tile;
+  fromSeat: number;
+  eligibleSeats: number[];
+  decisions: Record<string, ClaimDecision>;
+  expiresAt: number;
+}
+
 interface GameStatePayload {
   wall: Tile[];
   initialWallCount?: number;
   hands: Record<string, Tile[]>;
   melds: Record<string, Meld[]>;
+  bonuses: Record<string, Tile[]>;
   discards: Tile[];
   turn: number;
   mustDraw: boolean;
   turnStartedAt?: number;
   lastActionNotice?: string;
+  claimWindow?: PendingClaimWindow | null;
   diceInfo: DiceRollInfo;
   winnerInfo: {
     seat: number;
@@ -69,7 +85,27 @@ const WIND_KANJI = ['東', '南', '西', '北'];
 const WIND_NAMES = ['East', 'South', 'West', 'North'];
 const DRAGON_KANJI = ['中', '發', '白'];
 const DRAGON_NAMES = ['Red Dragon', 'Green Dragon', 'White Dragon'];
+const FLOWER_KANJI = ['梅', '蘭', '菊', '竹'];
+const FLOWER_NAMES = [
+  'Plum (Flower 1)',
+  'Orchid (Flower 2)',
+  'Chrysanthemum (Flower 3)',
+  'Bamboo (Flower 4)',
+];
+const SEASON_KANJI = ['春', '夏', '秋', '冬'];
+const SEASON_NAMES = [
+  'Spring (Season 1)',
+  'Summer (Season 2)',
+  'Autumn (Season 3)',
+  'Winter (Season 4)',
+];
+
 const TURN_LIMIT_SECONDS = 60;
+const CLAIM_WINDOW_MS = 5000;
+
+function isBonusTile(tile: Tile): boolean {
+  return tile.suit === 'flower' || tile.suit === 'season';
+}
 
 function rollThreeDice(): number[] {
   return [
@@ -79,10 +115,12 @@ function rollThreeDice(): number[] {
   ];
 }
 
+// 144 TILES LENGKAP: 108 Suits + 28 Honors + 8 Bonus (4 Bunga + 4 Musim)
 function generateDeck(): Tile[] {
   const deck: Tile[] = [];
   let uid = 0;
 
+  // 1. Suits (3 x 9 x 4 = 108 tiles)
   (['man', 'pin', 'sou'] as const).forEach((suit) => {
     for (let v = 1; v <= 9; v++) {
       for (let c = 0; c < 4; c++) {
@@ -108,6 +146,7 @@ function generateDeck(): Tile[] {
     }
   });
 
+  // 2. Honors - Winds (4 x 4 = 16 tiles)
   for (let v = 1; v <= 4; v++) {
     for (let c = 0; c < 4; c++) {
       deck.push({
@@ -121,6 +160,7 @@ function generateDeck(): Tile[] {
     }
   }
 
+  // 3. Honors - Dragons (3 x 4 = 12 tiles)
   for (let v = 1; v <= 3; v++) {
     for (let c = 0; c < 4; c++) {
       deck.push({
@@ -139,6 +179,27 @@ function generateDeck(): Tile[] {
     }
   }
 
+  // 4. Bonus - 4 Flowers & 4 Seasons (8 tiles)
+  for (let v = 1; v <= 4; v++) {
+    deck.push({
+      id: `flower_${v}_${uid++}`,
+      suit: 'flower',
+      value: v,
+      label: FLOWER_KANJI[v - 1],
+      sub: FLOWER_NAMES[v - 1],
+      color: 'text-pink-600',
+    });
+    deck.push({
+      id: `season_${v}_${uid++}`,
+      suit: 'season',
+      value: v,
+      label: SEASON_KANJI[v - 1],
+      sub: SEASON_NAMES[v - 1],
+      color: 'text-amber-600',
+    });
+  }
+
+  // Fisher-Yates Shuffle
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -146,8 +207,58 @@ function generateDeck(): Tile[] {
   return deck;
 }
 
+// Tarik batu untuk pemain sambil otomatis memisahkan batu Bunga/Musim ke area Bonus
+function drawWithFlowerReplacement(
+  wall: Tile[],
+  currentHand: Tile[],
+  currentBonuses: Tile[],
+  countToDraw: number
+): {
+  wall: Tile[];
+  hand: Tile[];
+  bonuses: Tile[];
+  drawnPlayable: Tile[];
+  drawnBonusCount: number;
+} {
+  const nextWall = [...wall];
+  const nextHand = [...currentHand];
+  const nextBonuses = [...currentBonuses];
+  const drawnPlayable: Tile[] = [];
+  let drawnBonusCount = 0;
+  let needed = countToDraw;
+
+  while (needed > 0 && nextWall.length > 0) {
+    const t = nextWall.pop()!;
+    if (isBonusTile(t)) {
+      nextBonuses.push(t);
+      drawnBonusCount++;
+      // Karena bonus dibuka, tetap butuh 1 batu pengganti lagi (needed tidak berkurang)
+    } else {
+      nextHand.push(t);
+      drawnPlayable.push(t);
+      needed--;
+    }
+  }
+
+  return {
+    wall: nextWall,
+    hand: nextHand,
+    bonuses: nextBonuses,
+    drawnPlayable,
+    drawnBonusCount,
+  };
+}
+
 function sortHand(hand: Tile[]): Tile[] {
-  const order = { man: 1, pin: 2, sou: 3, wind: 4, dragon: 5 };
+  const order: Record<Tile['suit'], number> = {
+    man: 1,
+    pin: 2,
+    sou: 3,
+    wind: 4,
+    dragon: 5,
+    flower: 6,
+    season: 7,
+  };
   return [...hand].sort((a, b) => {
     if (order[a.suit] !== order[b.suit]) return order[a.suit] - order[b.suit];
     return a.value - b.value;
@@ -207,8 +318,83 @@ function canWin(hand: Tile[], meldCount: number): boolean {
   return false;
 }
 
-/* KOMPONEN VISUAL BATU MAHJONG KLASIK */
+// Evaluasi opsi klaim untuk satu kursi tertentu terhadap batu yang baru dibuang
+function evaluateSeatClaim(
+  seat: number,
+  fromSeat: number,
+  discardedTile: Tile,
+  hand: Tile[],
+  meldCount: number
+): {
+  canWu: boolean;
+  canKong: boolean;
+  canPong: boolean;
+  chiCombos: Tile[][];
+} {
+  if (seat === fromSeat || isBonusTile(discardedTile)) {
+    return { canWu: false, canKong: false, canPong: false, chiCombos: [] };
+  }
+
+  const canWu = canWin([...hand, discardedTile], meldCount);
+  const matching = hand.filter(
+    (t) => t.suit === discardedTile.suit && t.value === discardedTile.value
+  );
+  const canPong = matching.length >= 2;
+  const canKong = matching.length >= 3;
+
+  const chiCombos: Tile[][] = [];
+  const nextSeatAfterDiscarder = (fromSeat + 1) % 4;
+  if (
+    seat === nextSeatAfterDiscarder &&
+    ['man', 'pin', 'sou'].includes(discardedTile.suit)
+  ) {
+    const v = discardedTile.value;
+    const findV = (val: number) =>
+      hand.find((t) => t.suit === discardedTile.suit && t.value === val);
+    const m2 = findV(v - 2);
+    const m1 = findV(v - 1);
+    const p1 = findV(v + 1);
+    const p2 = findV(v + 2);
+    if (m2 && m1) chiCombos.push([m2, m1]);
+    if (m1 && p1) chiCombos.push([m1, p1]);
+    if (p1 && p2) chiCombos.push([p1, p2]);
+  }
+
+  return { canWu, canKong, canPong, chiCombos };
+}
+
+/* KOMPONEN VISUAL BATU MAHJONG KLASIK (144 TILES) */
 function TileFace({ tile, compact = false }: { tile: Tile; compact?: boolean }) {
+  if (tile.suit === 'flower') {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center leading-none bg-pink-50/70">
+        <span
+          className={`${
+            compact ? 'text-[10px]' : 'text-base sm:text-lg'
+          } font-serif font-extrabold text-pink-600`}
+        >
+          {FLOWER_KANJI[tile.value - 1]}
+        </span>
+        <span className="text-[8px] font-bold text-pink-800">花{tile.value}</span>
+      </div>
+    );
+  }
+
+  if (tile.suit === 'season') {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center leading-none bg-amber-50/70">
+        <span
+          className={`${
+            compact ? 'text-[10px]' : 'text-base sm:text-lg'
+          } font-serif font-extrabold text-amber-600`}
+        >
+          {SEASON_KANJI[tile.value - 1]}
+        </span>
+        <span className="text-[8px] font-bold text-amber-800">季{tile.value}</span>
+      </div>
+    );
+  }
+
   if (tile.suit === 'man') {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center leading-none py-0.5">
@@ -480,15 +666,20 @@ function TileFace({ tile, compact = false }: { tile: Tile; compact?: boolean }) 
   );
 }
 
-/* MELD TERBUKA MILIK PEMAIN / LAWAN */
-function MeldStrip({
+/* MELD TERBUKA + BONUS BUNGA/MUSIM MILIK PEMAIN / LAWAN */
+function MeldAndBonusStrip({
   melds,
+  bonuses,
   vertical = false,
 }: {
   melds: Meld[];
+  bonuses: Tile[];
   vertical?: boolean;
 }) {
-  if (!melds || melds.length === 0) return null;
+  if ((!melds || melds.length === 0) && (!bonuses || bonuses.length === 0)) {
+    return null;
+  }
+
   return (
     <div
       className={`flex ${
@@ -496,7 +687,7 @@ function MeldStrip({
       } gap-1 bg-black/40 p-1 rounded-lg border border-amber-400/30`}
     >
       {melds.map((m, idx) => (
-        <div key={idx} className="flex flex-row gap-0.5" title={m.type}>
+        <div key={`m_${idx}`} className="flex flex-row gap-0.5" title={m.type}>
           {m.tiles.map((t, ti) => (
             <div
               key={ti}
@@ -507,6 +698,19 @@ function MeldStrip({
           ))}
         </div>
       ))}
+
+      {bonuses.length > 0 && (
+        <div className="flex flex-row gap-0.5" title="Bonus Bunga & Musim (+1 Faan)">
+          {bonuses.map((b, bi) => (
+            <div
+              key={`b_${bi}`}
+              className="w-5 h-7 sm:w-6 sm:h-8 rounded bg-pink-50 border border-pink-400 flex items-center justify-center overflow-hidden shadow-sm"
+            >
+              <TileFace tile={b} compact />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -527,6 +731,7 @@ export default function MahjongTable({
   const gameStateRef = useRef<GameStatePayload | null>(null);
   const livePlayersRef = useRef<any[]>(players);
   const botBusyRef = useRef<boolean>(false);
+  const resolvingClaimRef = useRef<boolean>(false);
 
   useEffect(() => {
     gameStateRef.current = gameState;
@@ -545,18 +750,11 @@ export default function MahjongTable({
   const [inspectedTile, setInspectedTile] = useState<Tile | null>(null);
   const [rpChangeShown, setRpChangeShown] = useState<number | null>(null);
   const [secondsLeft, setSecondsLeft] = useState<number>(TURN_LIMIT_SECONDS);
+  const [claimSecondsLeft, setClaimSecondsLeft] = useState<number>(5);
 
   const recordedWinRef = useRef<string | null>(null);
   const lastDiscardCountRef = useRef<number>(0);
   const autoTimeoutTriggeredRef = useRef<string | null>(null);
-
-  const [claimOptions, setClaimOptions] = useState<{
-    tile: Tile;
-    fromSeat: number;
-    canPong: boolean;
-    canKong: boolean;
-    chiCombos: Tile[][];
-  } | null>(null);
 
   const playTileClick = () => {
     try {
@@ -592,9 +790,11 @@ export default function MahjongTable({
         player_melds: nextState.melds,
         round_wind: JSON.stringify({
           mustDraw: nextState.mustDraw,
-          initialWallCount: nextState.initialWallCount ?? 84,
+          initialWallCount: nextState.initialWallCount ?? 92,
+          bonuses: nextState.bonuses || { '0': [], '1': [], '2': [], '3': [] },
           turnStartedAt: nextState.turnStartedAt ?? Date.now(),
           lastActionNotice: nextState.lastActionNotice ?? '',
+          claimWindow: nextState.claimWindow ?? null,
           diceInfo: nextState.diceInfo,
           winnerInfo: nextState.winnerInfo,
         }),
@@ -608,15 +808,19 @@ export default function MahjongTable({
     let meta: {
       mustDraw: boolean;
       initialWallCount?: number;
+      bonuses?: Record<string, Tile[]>;
       turnStartedAt?: number;
       lastActionNotice?: string;
+      claimWindow?: PendingClaimWindow | null;
       diceInfo?: DiceRollInfo;
       winnerInfo: any;
     } = {
       mustDraw: true,
-      initialWallCount: 84,
+      initialWallCount: 92,
+      bonuses: { '0': [], '1': [], '2': [], '3': [] },
       turnStartedAt: Date.now(),
       lastActionNotice: '',
+      claimWindow: null,
       winnerInfo: null,
     };
     try {
@@ -634,14 +838,16 @@ export default function MahjongTable({
 
     return {
       wall: row.wall_tiles || [],
-      initialWallCount: meta.initialWallCount ?? 84,
+      initialWallCount: meta.initialWallCount ?? 92,
       hands: row.player_hands || { '0': [], '1': [], '2': [], '3': [] },
       melds: row.player_melds || { '0': [], '1': [], '2': [], '3': [] },
+      bonuses: meta.bonuses || { '0': [], '1': [], '2': [], '3': [] },
       discards: row.discard_pile || [],
       turn: row.current_turn ?? 0,
       mustDraw: meta.mustDraw,
       turnStartedAt: meta.turnStartedAt || Date.now(),
       lastActionNotice: meta.lastActionNotice || '',
+      claimWindow: meta.claimWindow ?? null,
       diceInfo: meta.diceInfo || defaultDice,
       winnerInfo: meta.winnerInfo,
     };
@@ -701,13 +907,14 @@ export default function MahjongTable({
     playTileClick();
   };
 
+  // Inisialisasi ronde baru dengan 144 Tiles + Auto-Ganti Bonus Bunga/Musim + Fase Dadu
   const initRound = useCallback(async () => {
     recordedWinRef.current = null;
     lastDiscardCountRef.current = 0;
     botBusyRef.current = false;
+    resolvingClaimRef.current = false;
     autoTimeoutTriggeredRef.current = null;
     setRpChangeShown(null);
-    setClaimOptions(null);
     setDrawnTileId(null);
     setSelectedTileId(null);
 
@@ -728,24 +935,30 @@ export default function MahjongTable({
       }
     });
 
-    const deck = generateDeck();
-    const hands: Record<string, Tile[]> = {
-      '0': sortHand(deck.splice(0, 13)),
-      '1': sortHand(deck.splice(0, 13)),
-      '2': sortHand(deck.splice(0, 13)),
-      '3': sortHand(deck.splice(0, 13)),
-    };
+    let currentWall = generateDeck();
+    const hands: Record<string, Tile[]> = { '0': [], '1': [], '2': [], '3': [] };
+    const bonuses: Record<string, Tile[]> = { '0': [], '1': [], '2': [], '3': [] };
+
+    // Bagikan 13 kartu playable ke tiap kursi (jika dapat Bunga/Musim otomatis dipindah ke Bonus & diganti)
+    [0, 1, 2, 3].forEach((s) => {
+      const res = drawWithFlowerReplacement(currentWall, [], [], 13);
+      currentWall = res.wall;
+      hands[String(s)] = sortHand(res.hand);
+      bonuses[String(s)] = res.bonuses;
+    });
 
     const freshState: GameStatePayload = {
-      wall: deck,
-      initialWallCount: deck.length,
+      wall: currentWall,
+      initialWallCount: currentWall.length,
       hands,
       melds: { '0': [], '1': [], '2': [], '3': [] },
+      bonuses,
       discards: [],
       turn: 0,
       mustDraw: true,
       turnStartedAt: Date.now(),
-      lastActionNotice: '',
+      lastActionNotice: 'Dek 144 Tiles (termasuk 8 Bunga & Musim) siap!',
+      claimWindow: null,
       diceInfo: {
         phase: 'rolling',
         rolls: initialRolls,
@@ -882,7 +1095,7 @@ export default function MahjongTable({
       if (!gameStateRef.current?.winnerInfo) {
         syncFromServer();
       }
-    }, 1500);
+    }, 1200);
 
     const channel = supabase
       .channel(`game_state_${room.id}`)
@@ -914,7 +1127,7 @@ export default function MahjongTable({
     };
   }, [room.id, isHost, initRound, parseDbRow]);
 
-  // ANTI-BLINK: Simpan RP ke Supabase tanpa memicu unmount dari parent
+  // Pencatatan Skor Pemenang tanpa memicu layar loading induk
   useEffect(() => {
     if (!hasWinner || !gameState?.winnerInfo) {
       recordedWinRef.current = null;
@@ -943,9 +1156,7 @@ export default function MahjongTable({
         wins: didIWin ? profile.wins + 1 : profile.wins,
       })
       .eq('id', profile.id)
-      .then(() => {
-        // Sengaja tidak memanggil onProfileUpdated() di sini agar tidak memicu layar "Memuat Imperial Mahjong..."
-      });
+      .then(() => {});
   }, [
     hasWinner,
     gameState?.winnerInfo,
@@ -957,12 +1168,231 @@ export default function MahjongTable({
     room.type,
   ]);
 
+  // RESOLVER PRIORITY CLAIM WINDOW (WU > KONG / PONG > CHI)
+  const resolveClaimWindow = useCallback(
+    async (stateToResolve: GameStatePayload) => {
+      const cw = stateToResolve.claimWindow;
+      if (!cw || resolvingClaimRef.current) return;
+      resolvingClaimRef.current = true;
+
+      try {
+        const getSeatLabel = (seatIdx: number) => {
+          const found = livePlayersRef.current.find(
+            (p) => p.seat_index === seatIdx
+          );
+          return found
+            ? found.is_bot
+              ? found.bot_name
+              : found.profiles?.username
+            : `Player ${seatIdx + 1}`;
+        };
+
+        // Urutkan kandidat searah jarum jam mulai dari setelah pembuang (untuk tie-breaker WU)
+        const orderedSeats = [1, 2, 3].map((offset) => (cw.fromSeat + offset) % 4);
+
+        // 1. Cek Prioritas #1: WU / HU (Menang dari buangan lawan)
+        const wuWinnerSeat = orderedSeats.find(
+          (s) => cw.decisions[String(s)]?.type === 'WU'
+        );
+        if (wuWinnerSeat !== undefined) {
+          const seatKey = String(wuWinnerSeat);
+          const winHand = sortHand([
+            ...(stateToResolve.hands[seatKey] || []),
+            cw.tile,
+          ]);
+          const meldsCount = (stateToResolve.melds[seatKey] || []).length;
+          const bonusCount = (stateToResolve.bonuses[seatKey] || []).length;
+          const totalFaan = Math.max(1, meldsCount + bonusCount + 2);
+
+          await pushStateToSupabase({
+            ...stateToResolve,
+            hands: { ...stateToResolve.hands, [seatKey]: winHand },
+            discards: stateToResolve.discards.slice(0, -1),
+            claimWindow: null,
+            lastActionNotice: `🀄 ${getSeatLabel(
+              wuWinnerSeat
+            )} WU dari buangan ${getSeatLabel(cw.fromSeat)}!`,
+            winnerInfo: {
+              seat: wuWinnerSeat,
+              name: getSeatLabel(wuWinnerSeat),
+              faan: totalFaan,
+            },
+          });
+          return;
+        }
+
+        // 2. Cek Prioritas #2: KONG atau PONG
+        const kongOrPongSeat = orderedSeats.find((s) => {
+          const d = cw.decisions[String(s)]?.type;
+          return d === 'KONG' || d === 'PONG';
+        });
+
+        if (kongOrPongSeat !== undefined) {
+          const decision = cw.decisions[String(kongOrPongSeat)]!;
+          const seatKey = String(kongOrPongSeat);
+          const hand = stateToResolve.hands[seatKey] || [];
+          const neededFromHand = decision.type === 'KONG' ? 3 : 2;
+          const used = hand
+            .filter(
+              (t) => t.suit === cw.tile.suit && t.value === cw.tile.value
+            )
+            .slice(0, neededFromHand);
+          const usedIds = new Set(used.map((t) => t.id));
+          let remHand = hand.filter((t) => !usedIds.has(t.id));
+          let nextWall = [...stateToResolve.wall];
+          let nextBonuses = [...(stateToResolve.bonuses[seatKey] || [])];
+
+          // Jika KONG, langsung ambil batu pengganti (dengan auto-bunga) sebelum membuang
+          if (decision.type === 'KONG') {
+            const drawRes = drawWithFlowerReplacement(
+              nextWall,
+              remHand,
+              nextBonuses,
+              1
+            );
+            nextWall = drawRes.wall;
+            remHand = drawRes.hand;
+            nextBonuses = drawRes.bonuses;
+          }
+
+          const newMeld: Meld = {
+            type: decision.type as 'KONG' | 'PONG',
+            tiles: [...used, cw.tile],
+            fromSeat: cw.fromSeat,
+          };
+
+          await pushStateToSupabase({
+            ...stateToResolve,
+            wall: nextWall,
+            hands: { ...stateToResolve.hands, [seatKey]: remHand },
+            melds: {
+              ...stateToResolve.melds,
+              [seatKey]: [...(stateToResolve.melds[seatKey] || []), newMeld],
+            },
+            bonuses: { ...stateToResolve.bonuses, [seatKey]: nextBonuses },
+            discards: stateToResolve.discards.slice(0, -1),
+            turn: kongOrPongSeat,
+            mustDraw: false, // Sudah mengambil batu klaim, sekarang tinggal buang!
+            turnStartedAt: Date.now(),
+            claimWindow: null,
+            lastActionNotice: `🀄 ${getSeatLabel(kongOrPongSeat)} ${
+              decision.type
+            } ${cw.tile.sub}!`,
+          });
+          return;
+        }
+
+        // 3. Cek Prioritas #3: CHI (hanya jika tidak ada WU, KONG, atau PONG)
+        const chiSeat = orderedSeats.find(
+          (s) => cw.decisions[String(s)]?.type === 'CHI'
+        );
+
+        if (chiSeat !== undefined) {
+          const decision = cw.decisions[String(chiSeat)]!;
+          const seatKey = String(chiSeat);
+          const hand = stateToResolve.hands[seatKey] || [];
+          const pair = decision.pairTiles || [];
+          const usedIds = new Set(pair.map((t) => t.id));
+          const remHand = hand.filter((t) => !usedIds.has(t.id));
+
+          const newMeld: Meld = {
+            type: 'CHI',
+            tiles: [...pair, cw.tile],
+            fromSeat: cw.fromSeat,
+          };
+
+          await pushStateToSupabase({
+            ...stateToResolve,
+            hands: { ...stateToResolve.hands, [seatKey]: remHand },
+            melds: {
+              ...stateToResolve.melds,
+              [seatKey]: [...(stateToResolve.melds[seatKey] || []), newMeld],
+            },
+            discards: stateToResolve.discards.slice(0, -1),
+            turn: chiSeat,
+            mustDraw: false, // Sudah mengambil batu CHI, sekarang tinggal buang!
+            turnStartedAt: Date.now(),
+            claimWindow: null,
+            lastActionNotice: `🀄 ${getSeatLabel(chiSeat)} CHI ${cw.tile.sub}!`,
+          });
+          return;
+        }
+
+        // 4. Semua memilih PASS / waktu habis -> Lanjutkan giliran normal ke pemain berikutnya
+        await pushStateToSupabase({
+          ...stateToResolve,
+          turn: (cw.fromSeat + 1) % 4,
+          mustDraw: true,
+          turnStartedAt: Date.now(),
+          claimWindow: null,
+        });
+      } finally {
+        resolvingClaimRef.current = false;
+      }
+    },
+    [pushStateToSupabase]
+  );
+
+  // Pemain manusia mengirimkan pilihan klaimnya ke antrean prioritas
+  const submitMyClaimDecision = async (decision: ClaimDecision) => {
+    if (!gameState || !gameState.claimWindow) return;
+    playTileClick();
+
+    const updatedDecisions: Record<string, ClaimDecision> = {
+      ...gameState.claimWindow.decisions,
+      [String(mySeat)]: decision,
+    };
+
+    const nextState: GameStatePayload = {
+      ...gameState,
+      claimWindow: {
+        ...gameState.claimWindow,
+        decisions: updatedDecisions,
+      },
+    };
+
+    const allDecided = gameState.claimWindow.eligibleSeats.every((s) =>
+      Boolean(updatedDecisions[String(s)])
+    );
+
+    if (allDecided) {
+      await resolveClaimWindow(nextState);
+    } else {
+      await pushStateToSupabase(nextState);
+    }
+  };
+
+  // Monitor Jendela Klaim (5 detik countdown + auto-resolve saat semua selesai / expired)
+  useEffect(() => {
+    if (!gameState?.claimWindow || gameState.winnerInfo) return;
+
+    const interval = setInterval(async () => {
+      const latest = gameStateRef.current;
+      const cw = latest?.claimWindow;
+      if (!latest || !cw || latest.winnerInfo) return;
+
+      const remMs = Math.max(0, cw.expiresAt - Date.now());
+      setClaimSecondsLeft(Math.ceil(remMs / 1000));
+
+      const allDecided = cw.eligibleSeats.every((s) =>
+        Boolean(cw.decisions[String(s)])
+      );
+
+      if (isHost && (allDecided || remMs === 0)) {
+        await resolveClaimWindow(latest);
+      }
+    }, 300);
+
+    return () => clearInterval(interval);
+  }, [gameState?.claimWindow, gameState?.winnerInfo, isHost, resolveClaimWindow]);
+
   // TIMER BATAS 1 MENIT (60 DETIK) TIAP GILIRAN PEMAIN
   useEffect(() => {
     if (
       !gameState ||
       gameState.diceInfo.phase !== 'playing' ||
-      gameState.winnerInfo
+      gameState.winnerInfo ||
+      gameState.claimWindow
     ) {
       setSecondsLeft(TURN_LIMIT_SECONDS);
       return;
@@ -973,7 +1403,8 @@ export default function MahjongTable({
       if (
         !latest ||
         latest.diceInfo.phase !== 'playing' ||
-        latest.winnerInfo
+        latest.winnerInfo ||
+        latest.claimWindow
       ) {
         return;
       }
@@ -991,6 +1422,7 @@ export default function MahjongTable({
         const seatKey = String(mySeat);
         let nextWall = [...latest.wall];
         let hand = [...(latest.hands[seatKey] || [])];
+        let bonuses = [...(latest.bonuses[seatKey] || [])];
 
         if (latest.mustDraw) {
           if (nextWall.length === 0) {
@@ -1004,89 +1436,142 @@ export default function MahjongTable({
             });
             return;
           }
-          const drawn = nextWall.pop()!;
-          hand.push(drawn);
+          const drawRes = drawWithFlowerReplacement(nextWall, hand, bonuses, 1);
+          nextWall = drawRes.wall;
+          hand = drawRes.hand;
+          bonuses = drawRes.bonuses;
         }
 
+        if (hand.length === 0) return;
         const discarded = hand[hand.length - 1];
         const remaining = sortHand(hand.slice(0, -1));
         setSelectedTileId(null);
         setDrawnTileId(null);
-        setClaimOptions(null);
 
-        await pushStateToSupabase({
-          ...latest,
-          wall: nextWall,
-          hands: { ...latest.hands, [seatKey]: remaining },
-          discards: [...latest.discards, discarded],
-          turn: (mySeat + 1) % 4,
-          mustDraw: true,
-          turnStartedAt: Date.now(),
-          lastActionNotice: `${profile.username} kehabisan waktu (otomatis buang)`,
-        });
+        await executeDiscardWithPriorityCheck(
+          latest,
+          mySeat,
+          discarded,
+          remaining,
+          nextWall,
+          bonuses,
+          `${profile.username} kehabisan waktu (otomatis buang)`
+        );
       }
     }, 500);
 
     return () => clearInterval(interval);
   }, [gameState, mySeat, profile.username, pushStateToSupabase]);
 
-  // Deteksi Peluang Klaim Chi / Pong / Kong untuk Pemain Manusia
-  useEffect(() => {
-    if (
-      !gameState ||
-      gameState.diceInfo.phase !== 'playing' ||
-      gameState.winnerInfo ||
-      !gameState.mustDraw
-    ) {
-      setClaimOptions(null);
-      return;
-    }
-    if (gameState.discards.length === 0) return;
+  // Helper pembuangan kartu: langsung membuka Priority Claim Window jika ada pemain/bot yang bisa WU/KONG/PONG/CHI
+  const executeDiscardWithPriorityCheck = useCallback(
+    async (
+      baseState: GameStatePayload,
+      discarderSeat: number,
+      discardedTile: Tile,
+      remainingHand: Tile[],
+      nextWall: Tile[],
+      updatedDiscarderBonuses: Tile[],
+      noticeText = ''
+    ) => {
+      const seatKey = String(discarderSeat);
+      const updatedHands = { ...baseState.hands, [seatKey]: remainingHand };
+      const updatedBonuses = {
+        ...baseState.bonuses,
+        [seatKey]: updatedDiscarderBonuses,
+      };
+      const updatedDiscards = [...baseState.discards, discardedTile];
 
-    const lastDiscarder = (gameState.turn + 3) % 4;
-    if (lastDiscarder === mySeat) return;
+      // Cek keempat kursi untuk peluang klaim
+      const eligibleSeats: number[] = [];
+      const initialDecisions: Record<string, ClaimDecision> = {};
 
-    const lastTile = gameState.discards[gameState.discards.length - 1];
-    const myHand = gameState.hands[String(mySeat)] || [];
+      [0, 1, 2, 3].forEach((s) => {
+        if (s === discarderSeat) return;
+        const evalRes = evaluateSeatClaim(
+          s,
+          discarderSeat,
+          discardedTile,
+          updatedHands[String(s)] || [],
+          (baseState.melds[String(s)] || []).length
+        );
 
-    const same = myHand.filter(
-      (t) => t.suit === lastTile.suit && t.value === lastTile.value
-    );
-    const canPong = same.length >= 2;
-    const canKong = same.length >= 3;
+        const hasAnyOption =
+          evalRes.canWu ||
+          evalRes.canKong ||
+          evalRes.canPong ||
+          evalRes.chiCombos.length > 0;
 
-    const chiCombos: Tile[][] = [];
-    const leftSeat = (mySeat + 3) % 4;
-    if (
-      lastDiscarder === leftSeat &&
-      ['man', 'pin', 'sou'].includes(lastTile.suit)
-    ) {
-      const v = lastTile.value;
-      const findVal = (val: number) =>
-        myHand.find((t) => t.suit === lastTile.suit && t.value === val);
-      const m2 = findVal(v - 2);
-      const m1 = findVal(v - 1);
-      const p1 = findVal(v + 1);
-      const p2 = findVal(v + 2);
-      if (m2 && m1) chiCombos.push([m2, m1]);
-      if (m1 && p1) chiCombos.push([m1, p1]);
-      if (p1 && p2) chiCombos.push([p1, p2]);
-    }
-
-    if (canPong || canKong || chiCombos.length > 0) {
-      setClaimOptions({
-        tile: lastTile,
-        fromSeat: lastDiscarder,
-        canPong,
-        canKong,
-        chiCombos,
+        if (hasAnyOption) {
+          eligibleSeats.push(s);
+          const pObj = livePlayersRef.current.find((p) => p.seat_index === s);
+          // Jika kursi tersebut adalah Bot AI, daftarkan keputusan prioritas tertingginya langsung
+          if (pObj?.is_bot) {
+            if (evalRes.canWu) {
+              initialDecisions[String(s)] = { type: 'WU' };
+            } else if (evalRes.canKong) {
+              initialDecisions[String(s)] = { type: 'KONG' };
+            } else if (evalRes.canPong) {
+              initialDecisions[String(s)] = { type: 'PONG' };
+            } else if (evalRes.chiCombos.length > 0) {
+              initialDecisions[String(s)] = {
+                type: 'CHI',
+                pairTiles: evalRes.chiCombos[0],
+              };
+            }
+          }
+        }
       });
-    } else {
-      setClaimOptions(null);
-    }
-  }, [gameState, mySeat]);
 
-  // ENGINE BOT AI: Mampu CHI, PONG, KONG (membuka tiles di meja) & Draw/Discard
+      if (eligibleSeats.length > 0) {
+        const stateWithClaim: GameStatePayload = {
+          ...baseState,
+          wall: nextWall,
+          hands: updatedHands,
+          bonuses: updatedBonuses,
+          discards: updatedDiscards,
+          turn: (discarderSeat + 1) % 4,
+          mustDraw: true,
+          turnStartedAt: Date.now(),
+          lastActionNotice: noticeText,
+          claimWindow: {
+            tile: discardedTile,
+            fromSeat: discarderSeat,
+            eligibleSeats,
+            decisions: initialDecisions,
+            expiresAt: Date.now() + CLAIM_WINDOW_MS,
+          },
+        };
+
+        // Jika semua yang berhak adalah Bot AI (tidak ada manusia yang perlu ditunggu), langsung eksekusi prioritasnya!
+        const allBotsAlreadyDecided = eligibleSeats.every((s) =>
+          Boolean(initialDecisions[String(s)])
+        );
+        if (allBotsAlreadyDecided) {
+          await resolveClaimWindow(stateWithClaim);
+        } else {
+          await pushStateToSupabase(stateWithClaim);
+        }
+      } else {
+        // Tidak ada yang bisa klaim -> lanjut giliran normal
+        await pushStateToSupabase({
+          ...baseState,
+          wall: nextWall,
+          hands: updatedHands,
+          bonuses: updatedBonuses,
+          discards: updatedDiscards,
+          turn: (discarderSeat + 1) % 4,
+          mustDraw: true,
+          turnStartedAt: Date.now(),
+          lastActionNotice: noticeText,
+          claimWindow: null,
+        });
+      }
+    },
+    [pushStateToSupabase, resolveClaimWindow]
+  );
+
+  // ENGINE BOT AI: Draw (dengan auto-Bunga/Musim), Self-Wu, dan Discard cerdas
   useEffect(() => {
     if (!isHost) return;
 
@@ -1096,6 +1581,7 @@ export default function MahjongTable({
         !latest ||
         latest.diceInfo.phase !== 'playing' ||
         latest.winnerInfo ||
+        latest.claimWindow ||
         botBusyRef.current
       ) {
         return;
@@ -1116,6 +1602,7 @@ export default function MahjongTable({
             !fresh ||
             fresh.diceInfo.phase !== 'playing' ||
             fresh.winnerInfo ||
+            fresh.claimWindow ||
             fresh.turn !== activeTurn
           ) {
             botBusyRef.current = false;
@@ -1125,134 +1612,13 @@ export default function MahjongTable({
           const seatKey = String(activeTurn);
           const botName = currentSeatObj.bot_name || `Bot ${activeTurn + 1}`;
           let botHand = [...(fresh.hands[seatKey] || [])];
-          let botMelds = [...(fresh.melds[seatKey] || [])];
+          let botBonuses = [...(fresh.bonuses[seatKey] || [])];
+          const botMelds = fresh.melds[seatKey] || [];
           let nextWall = [...fresh.wall];
-          let nextDiscards = [...fresh.discards];
-          let actionNotice = '';
+          let flowerNotice = '';
 
-          // 1. Cek apakah Bot bisa KLAIM (KONG / PONG / CHI) kartu buangan terakhir
-          let claimedType: 'KONG' | 'PONG' | 'CHI' | null = null;
-          if (fresh.mustDraw && nextDiscards.length > 0) {
-            const lastDiscarder = (activeTurn + 3) % 4;
-            const lastTile = nextDiscards[nextDiscards.length - 1];
-
-            // Cek Kong / Pong di semua bot
-            for (const checkSeat of [0, 1, 2, 3]) {
-              const pObj = livePlayersRef.current.find(
-                (p) => p.seat_index === checkSeat
-              );
-              if (!pObj || !pObj.is_bot || checkSeat === lastDiscarder) continue;
-              const cHand = fresh.hands[String(checkSeat)] || [];
-              const matching = cHand.filter(
-                (t) => t.suit === lastTile.suit && t.value === lastTile.value
-              );
-
-              if (matching.length >= 3) {
-                const used = matching.slice(0, 3);
-                const usedIds = new Set(used.map((t) => t.id));
-                const rem = sortHand(cHand.filter((t) => !usedIds.has(t.id)));
-                const newMeld: Meld = {
-                  type: 'KONG',
-                  tiles: [...used, lastTile],
-                  fromSeat: lastDiscarder,
-                };
-                const drawnExtra = nextWall.pop();
-                if (drawnExtra) rem.push(drawnExtra);
-                const dIdx = Math.floor(Math.random() * rem.length);
-                const disc = rem[dIdx];
-                const finalHand = sortHand(rem.filter((_, i) => i !== dIdx));
-
-                await pushStateToSupabase({
-                  ...fresh,
-                  wall: nextWall,
-                  hands: { ...fresh.hands, [String(checkSeat)]: finalHand },
-                  melds: {
-                    ...fresh.melds,
-                    [String(checkSeat)]: [
-                      ...(fresh.melds[String(checkSeat)] || []),
-                      newMeld,
-                    ],
-                  },
-                  discards: [...nextDiscards.slice(0, -1), disc],
-                  turn: (checkSeat + 1) % 4,
-                  mustDraw: true,
-                  turnStartedAt: Date.now(),
-                  lastActionNotice: `${
-                    pObj.bot_name || 'AI'
-                  } melakukan KONG ${lastTile.sub}!`,
-                });
-                botBusyRef.current = false;
-                return;
-              }
-
-              if (matching.length >= 2) {
-                const used = matching.slice(0, 2);
-                const usedIds = new Set(used.map((t) => t.id));
-                const rem = sortHand(cHand.filter((t) => !usedIds.has(t.id)));
-                const newMeld: Meld = {
-                  type: 'PONG',
-                  tiles: [...used, lastTile],
-                  fromSeat: lastDiscarder,
-                };
-                const dIdx = Math.floor(Math.random() * rem.length);
-                const disc = rem[dIdx];
-                const finalHand = sortHand(rem.filter((_, i) => i !== dIdx));
-
-                await pushStateToSupabase({
-                  ...fresh,
-                  hands: { ...fresh.hands, [String(checkSeat)]: finalHand },
-                  melds: {
-                    ...fresh.melds,
-                    [String(checkSeat)]: [
-                      ...(fresh.melds[String(checkSeat)] || []),
-                      newMeld,
-                    ],
-                  },
-                  discards: [...nextDiscards.slice(0, -1), disc],
-                  turn: (checkSeat + 1) % 4,
-                  mustDraw: true,
-                  turnStartedAt: Date.now(),
-                  lastActionNotice: `${
-                    pObj.bot_name || 'AI'
-                  } melakukan PONG ${lastTile.sub}!`,
-                });
-                botBusyRef.current = false;
-                return;
-              }
-            }
-
-            // Cek CHI khusus untuk bot yang gilirannya tepat setelah pembuang
-            if (
-              lastDiscarder !== activeTurn &&
-              ['man', 'pin', 'sou'].includes(lastTile.suit)
-            ) {
-              const v = lastTile.value;
-              const findV = (val: number) =>
-                botHand.find((t) => t.suit === lastTile.suit && t.value === val);
-              const m2 = findV(v - 2);
-              const m1 = findV(v - 1);
-              const p1 = findV(v + 1);
-              const p2 = findV(v + 2);
-              const pair =
-                m2 && m1 ? [m2, m1] : m1 && p1 ? [m1, p1] : p1 && p2 ? [p1, p2] : null;
-
-              if (pair) {
-                const usedIds = new Set(pair.map((t) => t.id));
-                botHand = botHand.filter((t) => !usedIds.has(t.id));
-                botMelds.push({
-                  type: 'CHI',
-                  tiles: [...pair, lastTile],
-                  fromSeat: lastDiscarder,
-                });
-                nextDiscards = nextDiscards.slice(0, -1);
-                claimedType = 'CHI';
-                actionNotice = `${botName} melakukan CHI ${lastTile.sub}!`;
-              }
-            }
-          }
-
-          // 2. Jika tidak melakukan klaim, ambil 1 batu dari dinding
-          if (!claimedType) {
+          // 1. Jika harus Draw (bukan setelah Pong/Kong/Chi), tarik dari dinding + ganti Bunga/Musim
+          if (fresh.mustDraw) {
             if (nextWall.length === 0) {
               await pushStateToSupabase({
                 ...fresh,
@@ -1265,29 +1631,60 @@ export default function MahjongTable({
               botBusyRef.current = false;
               return;
             }
-            const drawn = nextWall.pop()!;
-            botHand.push(drawn);
+
+            const drawRes = drawWithFlowerReplacement(
+              nextWall,
+              botHand,
+              botBonuses,
+              1
+            );
+            nextWall = drawRes.wall;
+            botHand = drawRes.hand;
+            botBonuses = drawRes.bonuses;
+
+            if (drawRes.drawnBonusCount > 0) {
+              flowerNotice = `🌸 ${botName} mendapat ${drawRes.drawnBonusCount} Bunga/Musim (+Faan)!`;
+            }
+
+            // Jika dinding habis saat menarik pengganti bunga dan tangan belum lengkap
+            if (drawRes.drawnPlayable.length === 0 && nextWall.length === 0) {
+              await pushStateToSupabase({
+                ...fresh,
+                wall: nextWall,
+                bonuses: { ...fresh.bonuses, [seatKey]: botBonuses },
+                winnerInfo: {
+                  seat: -1,
+                  name: 'Draw Game (Dinding Habis)',
+                  faan: 0,
+                },
+              });
+              botBusyRef.current = false;
+              return;
+            }
           }
 
-          // 3. Cek apakah Bot menang (Wu)
+          // 2. Cek apakah Bot menang (Self-Draw Wu / Zimo)
           if (canWin(botHand, botMelds.length)) {
+            const totalFaan = Math.max(
+              1,
+              botMelds.length + botBonuses.length + 2
+            );
             await pushStateToSupabase({
               ...fresh,
               wall: nextWall,
               hands: { ...fresh.hands, [seatKey]: sortHand(botHand) },
-              melds: { ...fresh.melds, [seatKey]: botMelds },
-              discards: nextDiscards,
+              bonuses: { ...fresh.bonuses, [seatKey]: botBonuses },
               winnerInfo: {
                 seat: activeTurn,
                 name: botName,
-                faan: Math.max(1, botMelds.length + 1),
+                faan: totalFaan,
               },
             });
             botBusyRef.current = false;
             return;
           }
 
-          // 4. Bot membuang 1 kartu yang tidak berpasangan (lebih cerdas dari acak)
+          // 3. Bot memilih 1 kartu terisolasi untuk dibuang, lalu cek Priority Claim Window
           const counts: Record<string, number> = {};
           botHand.forEach((t) => {
             const k = `${t.suit}_${t.value}`;
@@ -1308,25 +1705,23 @@ export default function MahjongTable({
             botHand.filter((_, i) => i !== pick.idx)
           );
 
-          await pushStateToSupabase({
-            ...fresh,
-            wall: nextWall,
-            hands: { ...fresh.hands, [seatKey]: remaining },
-            melds: { ...fresh.melds, [seatKey]: botMelds },
-            discards: [...nextDiscards, discarded],
-            turn: (activeTurn + 1) % 4,
-            mustDraw: true,
-            turnStartedAt: Date.now(),
-            lastActionNotice: actionNotice,
-          });
+          await executeDiscardWithPriorityCheck(
+            fresh,
+            activeTurn,
+            discarded,
+            remaining,
+            nextWall,
+            botBonuses,
+            flowerNotice
+          );
         } finally {
           botBusyRef.current = false;
         }
-      }, 2200);
+      }, 2000);
     }, 600);
 
     return () => clearInterval(botWatchdog);
-  }, [isHost, pushStateToSupabase]);
+  }, [isHost, pushStateToSupabase, executeDiscardWithPriorityCheck]);
 
   const handleManualDraw = async () => {
     if (
@@ -1334,6 +1729,7 @@ export default function MahjongTable({
       gameState.diceInfo.phase !== 'playing' ||
       gameState.turn !== mySeat ||
       !gameState.mustDraw ||
+      gameState.claimWindow ||
       gameState.winnerInfo
     )
       return;
@@ -1347,21 +1743,41 @@ export default function MahjongTable({
     }
 
     playTileClick();
-    const nextWall = [...gameState.wall];
-    const drawn = nextWall.pop()!;
     const seatKey = String(mySeat);
-    const updatedHand = [...(gameState.hands[seatKey] || []), drawn];
+    const drawRes = drawWithFlowerReplacement(
+      gameState.wall,
+      gameState.hands[seatKey] || [],
+      gameState.bonuses[seatKey] || [],
+      1
+    );
 
-    setDrawnTileId(drawn.id);
-    setSelectedTileId(drawn.id);
-    setClaimOptions(null);
+    if (drawRes.drawnPlayable.length === 0 && drawRes.wall.length === 0) {
+      await pushStateToSupabase({
+        ...gameState,
+        wall: drawRes.wall,
+        bonuses: { ...gameState.bonuses, [seatKey]: drawRes.bonuses },
+        winnerInfo: { seat: -1, name: 'Draw Game (Dinding Habis)', faan: 0 },
+      });
+      return;
+    }
+
+    const lastPlayable =
+      drawRes.drawnPlayable[drawRes.drawnPlayable.length - 1];
+    if (lastPlayable) {
+      setDrawnTileId(lastPlayable.id);
+      setSelectedTileId(lastPlayable.id);
+    }
 
     await pushStateToSupabase({
       ...gameState,
-      wall: nextWall,
-      hands: { ...gameState.hands, [seatKey]: updatedHand },
+      wall: drawRes.wall,
+      hands: { ...gameState.hands, [seatKey]: drawRes.hand },
+      bonuses: { ...gameState.bonuses, [seatKey]: drawRes.bonuses },
       mustDraw: false,
-      lastActionNotice: '',
+      lastActionNotice:
+        drawRes.drawnBonusCount > 0
+          ? `🌸 Anda menarik ${drawRes.drawnBonusCount} Bunga/Musim (+Faan) & batu pengganti!`
+          : '',
     });
   };
 
@@ -1371,7 +1787,7 @@ export default function MahjongTable({
       gameState.diceInfo.phase !== 'playing' ||
       gameState.turn !== mySeat ||
       gameState.mustDraw ||
-      claimOptions ||
+      gameState.claimWindow ||
       gameState.winnerInfo
     )
       return;
@@ -1384,69 +1800,28 @@ export default function MahjongTable({
 
     setDrawnTileId(null);
     setSelectedTileId(null);
-    await pushStateToSupabase({
-      ...gameState,
-      hands: { ...gameState.hands, [seatKey]: remaining },
-      discards: [...gameState.discards, tile],
-      turn: (mySeat + 1) % 4,
-      mustDraw: true,
-      turnStartedAt: Date.now(),
-      lastActionNotice: '',
-    });
+
+    await executeDiscardWithPriorityCheck(
+      gameState,
+      mySeat,
+      tile,
+      remaining,
+      gameState.wall,
+      gameState.bonuses[seatKey] || [],
+      ''
+    );
   };
 
-  const executeClaim = async (
-    type: 'PONG' | 'KONG' | 'CHI',
-    pairTiles?: Tile[]
-  ) => {
-    if (!claimOptions || !gameState) return;
-    playTileClick();
-
-    const { tile, fromSeat } = claimOptions;
-    const seatKey = String(mySeat);
-    const myHand = gameState.hands[seatKey] || [];
-    let usedFromHand: Tile[] = [];
-
-    if (type === 'PONG') {
-      usedFromHand = myHand
-        .filter((t) => t.suit === tile.suit && t.value === tile.value)
-        .slice(0, 2);
-    } else if (type === 'KONG') {
-      usedFromHand = myHand
-        .filter((t) => t.suit === tile.suit && t.value === tile.value)
-        .slice(0, 3);
-    } else if (type === 'CHI' && pairTiles) {
-      usedFromHand = pairTiles;
-    }
-
-    const usedIds = new Set(usedFromHand.map((t) => t.id));
-    const remainingHand = myHand.filter((t) => !usedIds.has(t.id));
-    const nextMelds = [
-      ...(gameState.melds[seatKey] || []),
-      { type, tiles: [...usedFromHand, tile], fromSeat },
-    ];
-
-    setClaimOptions(null);
-    await pushStateToSupabase({
-      ...gameState,
-      hands: { ...gameState.hands, [seatKey]: remainingHand },
-      melds: { ...gameState.melds, [seatKey]: nextMelds },
-      discards: gameState.discards.slice(0, -1),
-      turn: mySeat,
-      mustDraw: type === 'KONG',
-      turnStartedAt: Date.now(),
-      lastActionNotice: `${profile.username} melakukan ${type} ${tile.sub}!`,
-    });
-  };
-
-  const declareWin = async () => {
+  const declareSelfWin = async () => {
     if (!gameState) return;
     playTileClick();
     const myMelds = gameState.melds[String(mySeat)] || [];
-    const faan = Math.max(1, myMelds.length + 1);
+    const myBonuses = gameState.bonuses[String(mySeat)] || [];
+    const faan = Math.max(1, myMelds.length + myBonuses.length + 2);
 
     await pushStateToSupabase({
       ...gameState,
+      lastActionNotice: `🀄 ${profile.username} WU (Zimo)!`,
       winnerInfo: { seat: mySeat, name: profile.username, faan },
     });
   };
@@ -1454,7 +1829,7 @@ export default function MahjongTable({
   if (!gameState) {
     return (
       <div className="min-h-screen bg-stone-950 text-amber-200 flex items-center justify-center text-sm">
-        Menyiapkan Meja Multiplayer...
+        Menyiapkan Meja Multiplayer (144 Tiles)...
       </div>
     );
   }
@@ -1477,23 +1852,48 @@ export default function MahjongTable({
   const currentTurnObj = livePlayers.find(
     (p) => p.seat_index === gameState.turn
   );
-  const isBotThinking = Boolean(currentTurnObj?.is_bot);
+  const isBotThinking =
+    Boolean(currentTurnObj?.is_bot) && !gameState.claimWindow;
 
   const myMelds = gameState.melds[String(bottomSeat)] || [];
+  const myBonuses = gameState.bonuses[String(bottomSeat)] || [];
   const topHand = gameState.hands[String(topSeat)] || [];
   const topMelds = gameState.melds[String(topSeat)] || [];
+  const topBonuses = gameState.bonuses[String(topSeat)] || [];
   const leftHand = gameState.hands[String(leftSeat)] || [];
   const leftMelds = gameState.melds[String(leftSeat)] || [];
+  const leftBonuses = gameState.bonuses[String(leftSeat)] || [];
   const rightHand = gameState.hands[String(rightSeat)] || [];
   const rightMelds = gameState.melds[String(rightSeat)] || [];
+  const rightBonuses = gameState.bonuses[String(rightSeat)] || [];
 
-  const playerCanHu = canWin(orderedMyHand, myMelds.length);
+  const playerCanSelfHu =
+    !gameState.claimWindow && canWin(orderedMyHand, myMelds.length);
+
+  // Cek apakah kita punya hak klaim di Priority Claim Window saat ini
+  const cw = gameState.claimWindow;
+  const amIEligibleToClaim = Boolean(
+    cw &&
+      cw.eligibleSeats.includes(mySeat) &&
+      !cw.decisions[String(mySeat)]
+  );
+  const myClaimEval =
+    cw && amIEligibleToClaim
+      ? evaluateSeatClaim(
+          mySeat,
+          cw.fromSeat,
+          cw.tile,
+          orderedMyHand,
+          myMelds.length
+        )
+      : null;
+
   const highlightedIds = new Set<string>();
-  if (claimOptions) {
+  if (cw && amIEligibleToClaim) {
     orderedMyHand.forEach((t) => {
       if (
-        t.suit === claimOptions.tile.suit &&
-        Math.abs(t.value - claimOptions.tile.value) <= 2
+        t.suit === cw.tile.suit &&
+        Math.abs(t.value - cw.tile.value) <= 2
       ) {
         highlightedIds.add(t.id);
       }
@@ -1505,26 +1905,26 @@ export default function MahjongTable({
     gameState.diceInfo.phase === 'playing' &&
     gameState.turn === mySeat &&
     gameState.mustDraw &&
-    !claimOptions &&
+    !cw &&
     !gameState.winnerInfo;
 
   const canClickDiscardNow =
     gameState.diceInfo.phase === 'playing' &&
     gameState.turn === mySeat &&
     !gameState.mustDraw &&
-    !claimOptions &&
+    !cw &&
     !gameState.winnerInfo;
 
-  // DINDING TILES 4 SISI INTERAKTIF (84 batu dibagi 4 sisi = 21 batu per sisi)
-  const initialTotal = gameState.initialWallCount || 84;
+  // DINDING TILES 4 SISI INTERAKTIF (92 sisa batu awal dari 144 tiles = 23 per sisi)
+  const initialTotal = gameState.initialWallCount || 92;
   const drawnCount = Math.max(0, initialTotal - gameState.wall.length);
-  const perSide = 21;
+  const perSide = Math.ceil(initialTotal / 4);
 
-  // Hitung sisa batu pada tiap sisi dinding secara berurutan searah jarum jam
   const renderWallSide = (sideIdx: number, horizontal: boolean) => {
     const startGlobal = sideIdx * perSide;
     return Array.from({ length: perSide }).map((_, i) => {
       const globalIdx = startGlobal + i;
+      if (globalIdx >= initialTotal) return null;
       const isTaken = globalIdx < drawnCount;
       const isNextToDraw = globalIdx === drawnCount;
 
@@ -1534,8 +1934,8 @@ export default function MahjongTable({
             key={i}
             className={
               horizontal
-                ? 'w-3 h-2 sm:w-4 sm:h-2.5 rounded-[2px] border border-emerald-400/10'
-                : 'w-2 h-3 sm:w-2.5 sm:h-4 rounded-[2px] border border-emerald-400/10'
+                ? 'w-2.5 h-2 sm:w-3.5 sm:h-2.5 rounded-[2px] border border-emerald-400/10'
+                : 'w-2 h-2.5 sm:w-2.5 sm:h-3.5 rounded-[2px] border border-emerald-400/10'
             }
           />
         );
@@ -1558,8 +1958,8 @@ export default function MahjongTable({
           }
           className={`${
             horizontal
-              ? 'w-3 h-2 sm:w-4 sm:h-2.5 border-b-2'
-              : 'w-2 h-3 sm:w-2.5 sm:h-4 border-r-2'
+              ? 'w-2.5 h-2 sm:w-3.5 sm:h-2.5 border-b-2'
+              : 'w-2 h-2.5 sm:w-2.5 sm:h-3.5 border-r-2'
           } rounded-[2px] transition-all ${
             isNextToDraw
               ? canClickDrawNow
@@ -1591,7 +1991,7 @@ export default function MahjongTable({
             <ArrowLeft className="w-3.5 h-3.5" /> Lobby
           </button>
           <span className="text-[11px] sm:text-xs px-2 py-1 rounded bg-amber-500/15 border border-amber-400/30 text-amber-300 font-mono">
-            {room.code} • {room.type.toUpperCase()}
+            {room.code} • 144-TILE
           </span>
         </div>
 
@@ -1599,12 +1999,15 @@ export default function MahjongTable({
           {gameState.diceInfo.phase === 'playing' && !gameState.winnerInfo && (
             <span
               className={`px-2 py-1 rounded font-mono font-bold flex items-center gap-1 border ${
-                secondsLeft <= 10
+                cw
+                  ? 'bg-purple-950 border-purple-400 text-purple-200 animate-pulse'
+                  : secondsLeft <= 10
                   ? 'bg-red-950 border-red-500 text-red-300 animate-pulse'
                   : 'bg-stone-900 border-stone-700 text-amber-200'
               }`}
             >
-              <Clock className="w-3.5 h-3.5" /> {secondsLeft}s
+              <Clock className="w-3.5 h-3.5" />{' '}
+              {cw ? `Klaim ${claimSecondsLeft}s` : `${secondsLeft}s`}
             </span>
           )}
           <span className="text-stone-300">
@@ -1615,6 +2018,8 @@ export default function MahjongTable({
             className={`px-2 py-1 rounded border font-semibold truncate max-w-[165px] sm:max-w-none ${
               gameState.diceInfo.phase === 'rolling'
                 ? 'bg-purple-950 border-purple-500/40 text-purple-200'
+                : cw
+                ? 'bg-amber-600 text-stone-950 border-amber-300'
                 : gameState.turn === mySeat
                 ? 'bg-amber-500 text-stone-950 border-amber-300'
                 : 'bg-emerald-950 border-emerald-500/40 text-emerald-300'
@@ -1622,6 +2027,8 @@ export default function MahjongTable({
           >
             {gameState.diceInfo.phase === 'rolling'
               ? 'Fase Lempar Dadu'
+              : cw
+              ? 'Jendela Klaim Prioritas'
               : gameState.turn === mySeat
               ? 'Giliran Anda!'
               : `${getSeatName(gameState.turn)}${
@@ -1634,24 +2041,25 @@ export default function MahjongTable({
       {/* AREA MEJA MAHJONG */}
       <div className="relative flex-1 flex items-center justify-center p-1.5 sm:p-3 [perspective:1100px]">
         <div
-          className={`relative w-full max-w-5xl min-h-[500px] sm:h-[595px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2 sm:p-4 ${
+          className={`relative w-full max-w-5xl min-h-[505px] sm:h-[605px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2 sm:p-4 ${
             tableTilt ? 'sm:[transform:rotateX(20deg)]' : ''
           }`}
         >
-          {/* LAWAN ATAS + MELD TERBUKA ATAS */}
+          {/* LAWAN ATAS + MELD & BONUS TERBUKA ATAS */}
           <div className="flex flex-col items-center gap-1">
             <div className="flex flex-wrap items-center justify-center gap-2">
               <div
                 className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs border ${
                   gameState.turn === topSeat &&
-                  gameState.diceInfo.phase === 'playing'
+                  gameState.diceInfo.phase === 'playing' &&
+                  !cw
                     ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                     : 'bg-black/50 text-stone-300 border-stone-700'
                 }`}
               >
                 {WIND_KANJI[topSeat]} {getSeatName(topSeat)} ({topHand.length})
               </div>
-              <MeldStrip melds={topMelds} />
+              <MeldAndBonusStrip melds={topMelds} bonuses={topBonuses} />
             </div>
             <div className="flex gap-0.5">
               {topHand.map((_, i) => (
@@ -1665,13 +2073,14 @@ export default function MahjongTable({
 
           {/* TENGAH MEJA */}
           <div className="flex items-center justify-between flex-1 my-1 sm:my-2 gap-1 sm:gap-3">
-            {/* Lawan Kiri + Meld Terbuka Kiri */}
+            {/* Lawan Kiri + Meld & Bonus Terbuka Kiri */}
             <div className="flex items-center gap-1.5 shrink-0">
               <div className="flex flex-col items-center gap-1">
                 <div
                   className={`px-1.5 sm:px-2 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[68px] sm:max-w-[95px] truncate ${
                     gameState.turn === leftSeat &&
-                    gameState.diceInfo.phase === 'playing'
+                    gameState.diceInfo.phase === 'playing' &&
+                    !cw
                       ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                       : 'bg-black/50 text-stone-300 border-stone-700'
                   }`}
@@ -1687,26 +2096,29 @@ export default function MahjongTable({
                   ))}
                 </div>
               </div>
-              <MeldStrip melds={leftMelds} vertical />
+              <MeldAndBonusStrip
+                melds={leftMelds}
+                bonuses={leftBonuses}
+                vertical
+              />
             </div>
 
             {/* DINDING TILES 4 SISI AKTIF + KOLAM BUANGAN + TOMBOL AKSI TENGAH */}
             <div className="relative flex-1 max-w-md flex flex-col items-center justify-center">
-              {/* Notifikasi Aksi Chi / Pong / Kong Bot atau Pemain */}
               {gameState.lastActionNotice &&
                 gameState.diceInfo.phase === 'playing' && (
-                  <div className="mb-1 px-3 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-[11px] text-amber-200 font-bold animate-fade-in">
-                    🀄 {gameState.lastActionNotice}
+                  <div className="mb-1 px-3 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-[11px] text-amber-200 font-bold text-center">
+                    {gameState.lastActionNotice}
                   </div>
                 )}
 
-              {/* Dinding Utara (Atas Kolam) */}
+              {/* Dinding Utara */}
               <div className="flex gap-0.5 mb-1">
                 {renderWallSide(0, true)}
               </div>
 
               <div className="flex items-center justify-center w-full gap-1">
-                {/* Dinding Barat (Kiri Kolam) */}
+                {/* Dinding Barat */}
                 <div className="flex flex-col gap-0.5">
                   {renderWallSide(3, false)}
                 </div>
@@ -1818,18 +2230,18 @@ export default function MahjongTable({
                   )}
                 </div>
 
-                {/* Dinding Timur (Kanan Kolam) */}
+                {/* Dinding Timur */}
                 <div className="flex flex-col gap-0.5">
                   {renderWallSide(1, false)}
                 </div>
               </div>
 
-              {/* Dinding Selatan (Bawah Kolam) */}
+              {/* Dinding Selatan */}
               <div className="flex gap-0.5 mt-1">
                 {renderWallSide(2, true)}
               </div>
 
-              {/* TOMBOL AKSI UTAMA DI TENGAH MEJA (ANTI BLIND SPOT) */}
+              {/* TOMBOL AKSI UTAMA DI TENGAH MEJA (ANTI BLIND SPOT + PRIORITY CLAIM) */}
               {gameState.diceInfo.phase === 'playing' &&
                 !gameState.winnerInfo && (
                   <div className="mt-2 flex flex-wrap items-center justify-center gap-2 z-20">
@@ -1843,65 +2255,100 @@ export default function MahjongTable({
                       </button>
                     )}
 
-                    {playerCanHu && (
+                    {playerCanSelfHu && (
                       <button
-                        onClick={declareWin}
+                        onClick={declareSelfWin}
                         className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-xs sm:text-sm shadow-xl animate-bounce"
                       >
                         🀄 WU / HU (MENANG)!
                       </button>
                     )}
 
-                    {claimOptions && (
+                    {/* PRIORITY CLAIM WINDOW BAR */}
+                    {cw && amIEligibleToClaim && myClaimEval && (
                       <div className="flex flex-wrap items-center justify-center gap-1.5 bg-stone-950/95 border-2 border-amber-400 px-3 py-1.5 rounded-xl shadow-2xl">
-                        <span className="text-xs text-amber-200 mr-1">
-                          Klaim <strong>{claimOptions.tile.sub}</strong>:
+                        <span className="text-[11px] text-amber-200 mr-1">
+                          Prioritas ({claimSecondsLeft}s) •{' '}
+                          <strong>{cw.tile.sub}</strong>:
                         </span>
-                        {claimOptions.canKong && (
+
+                        {myClaimEval.canWu && (
                           <button
-                            onClick={() => executeClaim('KONG')}
+                            onClick={() => submitMyClaimDecision({ type: 'WU' })}
+                            className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold animate-bounce"
+                          >
+                            🀄 WU (#1)
+                          </button>
+                        )}
+
+                        {myClaimEval.canKong && (
+                          <button
+                            onClick={() =>
+                              submitMyClaimDecision({ type: 'KONG' })
+                            }
                             className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-extrabold"
                           >
-                            KONG
+                            KONG (#2)
                           </button>
                         )}
-                        {claimOptions.canPong && (
+
+                        {myClaimEval.canPong && (
                           <button
-                            onClick={() => executeClaim('PONG')}
+                            onClick={() =>
+                              submitMyClaimDecision({ type: 'PONG' })
+                            }
                             className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-extrabold"
                           >
-                            PONG
+                            PONG (#2)
                           </button>
                         )}
-                        {claimOptions.chiCombos.map((combo, i) => (
+
+                        {myClaimEval.chiCombos.map((combo, i) => (
                           <button
                             key={i}
-                            onClick={() => executeClaim('CHI', combo)}
+                            onClick={() =>
+                              submitMyClaimDecision({
+                                type: 'CHI',
+                                pairTiles: combo,
+                              })
+                            }
                             className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-extrabold"
                           >
                             CHI ({combo[0].value}-{combo[1].value})
                           </button>
                         ))}
+
                         <button
-                          onClick={() => setClaimOptions(null)}
+                          onClick={() => submitMyClaimDecision({ type: 'PASS' })}
                           className="px-2.5 py-1 rounded-lg bg-stone-700 hover:bg-stone-600 text-xs font-semibold"
                         >
                           Lewati
                         </button>
                       </div>
                     )}
+
+                    {cw && !amIEligibleToClaim && (
+                      <div className="px-3 py-1 rounded-lg bg-stone-950/90 border border-amber-400/40 text-xs text-amber-200 animate-pulse">
+                        Menunggu keputusan klaim pemain ({claimSecondsLeft}s)...
+                      </div>
+                    )}
                   </div>
                 )}
             </div>
 
-            {/* Lawan Kanan + Meld Terbuka Kanan */}
+            {/* Lawan Kanan + Meld & Bonus Terbuka Kanan */}
             <div className="flex items-center gap-1.5 shrink-0">
-              <MeldStrip melds={rightMelds} vertical />
+              <MeldAndBonusStrip
+                melds={rightMelds}
+                bonuses={rightBonuses}
+                vertical
+              />
               <div className="flex flex-col items-center gap-1">
                 <div
                   className={`px-1.5 sm:px-2 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[68px] sm:max-w-[95px] truncate ${
                     gameState.turn === rightSeat &&
-                    gameState.diceInfo.phase === 'playing'
+                    gameState.diceInfo.phase === 'playing' &&
+                    !cw
                       ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                       : 'bg-black/50 text-stone-300 border-stone-700'
                   }`}
@@ -1920,7 +2367,7 @@ export default function MahjongTable({
             </div>
           </div>
 
-          {/* AREA PEMAIN BAWAH + SUSUN BATU PRIBADI + MELD TERBUKA PRIBADI */}
+          {/* AREA PEMAIN BAWAH + SUSUN BATU PRIBADI + MELD & BONUS TERBUKA PRIBADI */}
           <div className="flex flex-col gap-1.5 pt-2 border-t border-emerald-400/20">
             <div className="flex flex-wrap items-center justify-between gap-2 px-1">
               <div className="flex items-center gap-1.5">
@@ -2022,7 +2469,7 @@ export default function MahjongTable({
                 })}
               </div>
 
-              <MeldStrip melds={myMelds} />
+              <MeldAndBonusStrip melds={myMelds} bonuses={myBonuses} />
             </div>
           </div>
         </div>
@@ -2048,13 +2495,17 @@ export default function MahjongTable({
           )}
         </div>
 
-        <div className="text-[11px] text-stone-400">
-          Batas jalan: <strong className="text-amber-300">60 detik</strong> /
-          giliran
+        <div className="flex items-center gap-3 text-[11px] text-stone-400">
+          <span className="hidden sm:inline-flex items-center gap-1 text-pink-300">
+            <Flower2 className="w-3.5 h-3.5" /> Prioritas: WU &gt; KONG/PONG &gt; CHI
+          </span>
+          <span>
+            Batas jalan: <strong className="text-amber-300">60s</strong>
+          </span>
         </div>
       </div>
 
-      {/* MODAL HASIL PERTANDINGAN (BEBAS BLINK) */}
+      {/* MODAL HASIL PERTANDINGAN */}
       {gameState.winnerInfo && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-stone-900 border-2 border-amber-400 rounded-2xl p-6 max-w-sm w-full text-center space-y-4 shadow-2xl">
