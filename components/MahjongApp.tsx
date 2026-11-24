@@ -14,6 +14,7 @@ import {
   UserCheck,
   Trophy,
   Sparkles,
+  ArrowLeftRight,
 } from 'lucide-react';
 
 export default function MahjongApp() {
@@ -33,6 +34,7 @@ export default function MahjongApp() {
     host_id: string;
   } | null>(null);
   const [roomPlayers, setRoomPlayers] = useState<any[]>([]);
+  const [switchingSeat, setSwitchingSeat] = useState(false);
   const [copied, setCopied] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [leaderboard, setLeaderboard] = useState<UserProfile[]>([]);
@@ -46,60 +48,82 @@ export default function MahjongApp() {
     if (data) setLeaderboard(data as UserProfile[]);
   }, []);
 
-  const checkSession = useCallback(async () => {
-    setLoading(true);
+  // Refresh profil di latar belakang TANPA menyalakan loading screen (anti-blink saat menang)
+  const silentRefreshProfile = useCallback(async () => {
     const {
       data: { session },
     } = await supabase.auth.getSession();
-
-    if (session?.user) {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', session.user.id)
-        .maybeSingle();
-
-      if (error) {
-        setAuthError('Database Error: ' + error.message);
-        setProfile(null);
-        setLoading(false);
-        return;
-      }
-
-      if (data) {
-        setProfile(data as UserProfile);
-      } else {
-        const fallbackName =
-          session.user.user_metadata?.username ||
-          `Guest_${session.user.id.slice(0, 5)}`;
-        const { data: created, error: insertErr } = await supabase
-          .from('profiles')
-          .insert({
-            id: session.user.id,
-            username: fallbackName,
-            is_guest: true,
-          })
-          .select()
-          .single();
-
-        if (insertErr) {
-          setAuthError('Gagal membuat profil: ' + insertErr.message);
-          setProfile(null);
-        } else if (created) {
-          setProfile(created as UserProfile);
-        }
-      }
-      fetchLeaderboard();
-    } else {
-      setProfile(null);
+    if (!session?.user) return;
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', session.user.id)
+      .maybeSingle();
+    if (data) {
+      setProfile(data as UserProfile);
     }
-    setLoading(false);
+    fetchLeaderboard();
   }, [fetchLeaderboard]);
 
+  const checkSession = useCallback(
+    async (showSpinner = true) => {
+      if (showSpinner) setLoading(true);
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (session?.user) {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .maybeSingle();
+
+        if (error) {
+          setAuthError('Database Error: ' + error.message);
+          setProfile(null);
+          setLoading(false);
+          return;
+        }
+
+        if (data) {
+          setProfile(data as UserProfile);
+        } else {
+          const fallbackName =
+            session.user.user_metadata?.username ||
+            `Guest_${session.user.id.slice(0, 5)}`;
+          const { data: created, error: insertErr } = await supabase
+            .from('profiles')
+            .insert({
+              id: session.user.id,
+              username: fallbackName,
+              is_guest: true,
+            })
+            .select()
+            .single();
+
+          if (insertErr) {
+            setAuthError('Gagal membuat profil: ' + insertErr.message);
+            setProfile(null);
+          } else if (created) {
+            setProfile(created as UserProfile);
+          }
+        }
+        fetchLeaderboard();
+      } else {
+        setProfile(null);
+      }
+      setLoading(false);
+    },
+    [fetchLeaderboard]
+  );
+
   useEffect(() => {
-    checkSession();
-    const { data: listener } = supabase.auth.onAuthStateChange(() => {
-      checkSession();
+    checkSession(true);
+    const { data: listener } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+        checkSession(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, [checkSession]);
@@ -295,7 +319,37 @@ export default function MahjongApp() {
     });
   }
 
-  // Host mengisi hanya kursi yang benar-benar kosong dengan Bot AI
+  // Pindah ke slot kursi (East / South / West / North) yang masih kosong
+  async function handleSwitchSeat(targetSeatIndex: number) {
+    if (!activeRoom || !profile || switchingSeat) return;
+
+    const latestPlayers = await fetchPlayers(activeRoom.id);
+    const isTaken = latestPlayers.some((p) => p.seat_index === targetSeatIndex);
+    if (isTaken) {
+      alert('Kursi tersebut baru saja diisi pemain lain.');
+      return;
+    }
+
+    const myRow = latestPlayers.find((p) => p.user_id === profile.id);
+    if (!myRow || myRow.seat_index === targetSeatIndex) return;
+
+    setSwitchingSeat(true);
+    try {
+      const { error } = await supabase
+        .from('room_players')
+        .update({ seat_index: targetSeatIndex })
+        .eq('id', myRow.id);
+
+      if (error) {
+        alert('Gagal pindah posisi: ' + error.message);
+      } else {
+        await fetchPlayers(activeRoom.id);
+      }
+    } finally {
+      setSwitchingSeat(false);
+    }
+  }
+
   async function startMatchAsHost() {
     if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
 
@@ -336,7 +390,7 @@ export default function MahjongApp() {
     setIsPlaying(false);
     setActiveRoom(null);
     setRoomPlayers([]);
-    fetchLeaderboard();
+    silentRefreshProfile();
   }
 
   if (loading) {
@@ -359,7 +413,7 @@ export default function MahjongApp() {
               IMPERIAL MAHJONG
             </h1>
             <p className="text-xs text-stone-400 mt-1">
-              Hong Kong 136-Tile • Ranked & Private Room
+              Hong Kong Mahjong • Ranked & Private Room
             </p>
           </div>
 
@@ -477,7 +531,7 @@ export default function MahjongApp() {
         room={activeRoom}
         players={roomPlayers}
         onExitRoom={leaveRoom}
-        onProfileUpdated={checkSession}
+        onProfileUpdated={silentRefreshProfile}
       />
     );
   }
@@ -665,43 +719,66 @@ export default function MahjongApp() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
-              {[
-                'East (Timur)',
-                'South (Selatan)',
-                'West (Barat)',
-                'North (Utara)',
-              ].map((wind, idx) => {
-                const occupant = roomPlayers.find((p) => p.seat_index === idx);
-                return (
-                  <div
-                    key={wind}
-                    className={`p-3 rounded-lg border text-center ${
-                      occupant
-                        ? 'bg-emerald-950/30 border-emerald-500/40'
-                        : 'bg-stone-950 border-stone-800 border-dashed'
-                    }`}
-                  >
-                    <div className="text-[11px] text-stone-400 mb-1">
-                      {wind}
-                    </div>
-                    {occupant ? (
-                      <div className="font-semibold text-xs sm:text-sm text-amber-200 flex items-center justify-center gap-1 truncate">
-                        <UserCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span className="truncate">
-                          {occupant.is_bot
-                            ? occupant.bot_name
-                            : occupant.profiles?.username}
-                        </span>
+            <div className="space-y-2">
+              <div className="text-[11px] text-stone-400 flex items-center justify-between">
+                <span>Pilih Posisi Kursi Angin (klik slot kosong untuk pindah):</span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
+                {[
+                  'East (Timur)',
+                  'South (Selatan)',
+                  'West (Barat)',
+                  'North (Utara)',
+                ].map((wind, idx) => {
+                  const occupant = roomPlayers.find((p) => p.seat_index === idx);
+                  const isMe = occupant?.user_id === profile.id;
+
+                  if (occupant) {
+                    return (
+                      <div
+                        key={wind}
+                        className={`p-3 rounded-lg border text-center transition ${
+                          isMe
+                            ? 'bg-emerald-950/50 border-amber-400 shadow-md shadow-amber-500/10'
+                            : 'bg-emerald-950/30 border-emerald-500/40'
+                        }`}
+                      >
+                        <div className="text-[11px] text-stone-400 mb-1">
+                          {wind} {isMe && <span className="text-amber-300">(Anda)</span>}
+                        </div>
+                        <div className="font-semibold text-xs sm:text-sm text-amber-200 flex items-center justify-center gap-1 truncate">
+                          <UserCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span className="truncate">
+                            {occupant.is_bot
+                              ? occupant.bot_name
+                              : occupant.profiles?.username}
+                          </span>
+                        </div>
                       </div>
-                    ) : (
-                      <div className="text-xs text-stone-600 py-1">
-                        Menunggu Pemain...
+                    );
+                  }
+
+                  return (
+                    <button
+                      key={wind}
+                      type="button"
+                      disabled={switchingSeat}
+                      onClick={() => handleSwitchSeat(idx)}
+                      className="p-3 rounded-lg border border-dashed border-stone-700 hover:border-amber-400 bg-stone-950 hover:bg-amber-500/10 text-center transition group cursor-pointer disabled:opacity-50"
+                      title={`Pindah ke kursi ${wind}`}
+                    >
+                      <div className="text-[11px] text-stone-400 group-hover:text-amber-300 mb-1">
+                        {wind}
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                      <div className="text-xs text-stone-500 group-hover:text-amber-200 py-1 flex items-center justify-center gap-1 font-medium">
+                        <ArrowLeftRight className="w-3 h-3" />
+                        <span>Pindah ke Sini</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}
