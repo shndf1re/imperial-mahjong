@@ -41,16 +41,10 @@ interface MahjongTableProps {
   onProfileUpdated: () => void;
 }
 
-const SUIT_SYMBOLS: Record<string, string[]> = {
-  man: ['一', '二', '三', '四', '五', '六', '七', '八', '九'],
-  pin: ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨'],
-  sou: ['1索', '2索', '3索', '4索', '5索', '6索', '7索', '8索', '9索'],
-  wind: ['東', '南', '西', '北'],
-  dragon: ['中', '發', '白'],
-};
-
-const WIND_NAMES = ['East', 'South', 'West', 'North'];
+const MAN_KANJI = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
 const WIND_KANJI = ['東', '南', '西', '北'];
+const WIND_NAMES = ['East', 'South', 'West', 'North'];
+const DRAGON_KANJI = ['中', '發', '白'];
 const DRAGON_NAMES = ['Red Dragon', 'Green Dragon', 'White Dragon'];
 
 function generateDeck(): Tile[] {
@@ -64,13 +58,18 @@ function generateDeck(): Tile[] {
           id: `${suit}_${v}_${uid++}`,
           suit,
           value: v,
-          label: SUIT_SYMBOLS[suit][v - 1],
-          sub: suit === 'man' ? '萬' : suit === 'pin' ? '筒' : '索',
+          label: suit === 'man' ? MAN_KANJI[v - 1] : `${v}`,
+          sub:
+            suit === 'man'
+              ? `${v} Wan`
+              : suit === 'pin'
+              ? `${v} Dots`
+              : `${v} Bamboo`,
           color:
             suit === 'man'
-              ? 'text-red-700'
+              ? 'text-blue-800'
               : suit === 'pin'
-              ? 'text-blue-700'
+              ? 'text-red-700'
               : 'text-emerald-700',
         });
       }
@@ -83,9 +82,9 @@ function generateDeck(): Tile[] {
         id: `wind_${v}_${uid++}`,
         suit: 'wind',
         value: v,
-        label: SUIT_SYMBOLS.wind[v - 1],
+        label: WIND_KANJI[v - 1],
         sub: WIND_NAMES[v - 1],
-        color: 'text-stone-900',
+        color: 'text-blue-800',
       });
     }
   }
@@ -96,7 +95,7 @@ function generateDeck(): Tile[] {
         id: `dragon_${v}_${uid++}`,
         suit: 'dragon',
         value: v,
-        label: SUIT_SYMBOLS.dragon[v - 1],
+        label: DRAGON_KANJI[v - 1],
         sub: DRAGON_NAMES[v - 1],
         color:
           v === 1
@@ -176,6 +175,264 @@ function canWin(hand: Tile[], meldCount: number): boolean {
   return false;
 }
 
+/* KOMPONEN VISUAL BATU MAHJONG KLASIK (DOTS, BAMBOO, SYMBOLS, WINDS, DRAGONS) */
+function TileFace({ tile }: { tile: Tile }) {
+  // 1. SUIT: SYMBOLS (MAN / WAN) -> Angka Biru di atas + 萬 Merah di bawah
+  if (tile.suit === 'man') {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center leading-none py-0.5">
+        <span className="text-[13px] sm:text-[17px] font-serif font-extrabold text-[#1d4ed8]">
+          {MAN_KANJI[tile.value - 1]}
+        </span>
+        <span className="text-[12px] sm:text-[15px] font-serif font-extrabold text-[#b91c1c] mt-0.5">
+          萬
+        </span>
+      </div>
+    );
+  }
+
+  // 2. SUIT: DOTS (PIN) -> Ilustrasi Lingkaran Warna-Warni Klasik
+  if (tile.suit === 'pin') {
+    const dotLayouts: Record<
+      number,
+      { cx: number; cy: number; r: number; fill: string }[]
+    > = {
+      1: [{ cx: 30, cy: 40, r: 17, fill: '#b91c1c' }],
+      2: [
+        { cx: 30, cy: 23, r: 11, fill: '#15803d' },
+        { cx: 30, cy: 57, r: 11, fill: '#1d4ed8' },
+      ],
+      3: [
+        { cx: 17, cy: 19, r: 8.5, fill: '#1d4ed8' },
+        { cx: 30, cy: 40, r: 8.5, fill: '#b91c1c' },
+        { cx: 43, cy: 61, r: 8.5, fill: '#15803d' },
+      ],
+      4: [
+        { cx: 19, cy: 23, r: 9.5, fill: '#1d4ed8' },
+        { cx: 41, cy: 23, r: 9.5, fill: '#15803d' },
+        { cx: 19, cy: 57, r: 9.5, fill: '#15803d' },
+        { cx: 41, cy: 57, r: 9.5, fill: '#1d4ed8' },
+      ],
+      5: [
+        { cx: 18, cy: 20, r: 8, fill: '#1d4ed8' },
+        { cx: 42, cy: 20, r: 8, fill: '#15803d' },
+        { cx: 30, cy: 40, r: 8, fill: '#b91c1c' },
+        { cx: 18, cy: 60, r: 8, fill: '#15803d' },
+        { cx: 42, cy: 60, r: 8, fill: '#1d4ed8' },
+      ],
+      6: [
+        { cx: 19, cy: 18, r: 8, fill: '#15803d' },
+        { cx: 41, cy: 18, r: 8, fill: '#15803d' },
+        { cx: 19, cy: 41, r: 8, fill: '#b91c1c' },
+        { cx: 41, cy: 41, r: 8, fill: '#b91c1c' },
+        { cx: 19, cy: 62, r: 8, fill: '#b91c1c' },
+        { cx: 41, cy: 62, r: 8, fill: '#b91c1c' },
+      ],
+      7: [
+        { cx: 16, cy: 15, r: 6.5, fill: '#15803d' },
+        { cx: 30, cy: 21, r: 6.5, fill: '#15803d' },
+        { cx: 44, cy: 27, r: 6.5, fill: '#15803d' },
+        { cx: 19, cy: 45, r: 7.5, fill: '#b91c1c' },
+        { cx: 41, cy: 45, r: 7.5, fill: '#b91c1c' },
+        { cx: 19, cy: 64, r: 7.5, fill: '#b91c1c' },
+        { cx: 41, cy: 64, r: 7.5, fill: '#b91c1c' },
+      ],
+      8: [
+        { cx: 20, cy: 14, r: 6.5, fill: '#1d4ed8' },
+        { cx: 40, cy: 14, r: 6.5, fill: '#1d4ed8' },
+        { cx: 20, cy: 31, r: 6.5, fill: '#1d4ed8' },
+        { cx: 40, cy: 31, r: 6.5, fill: '#1d4ed8' },
+        { cx: 20, cy: 49, r: 6.5, fill: '#1d4ed8' },
+        { cx: 40, cy: 49, r: 6.5, fill: '#1d4ed8' },
+        { cx: 20, cy: 66, r: 6.5, fill: '#1d4ed8' },
+        { cx: 40, cy: 66, r: 6.5, fill: '#1d4ed8' },
+      ],
+      9: [
+        { cx: 15, cy: 17, r: 6.5, fill: '#15803d' },
+        { cx: 30, cy: 17, r: 6.5, fill: '#15803d' },
+        { cx: 45, cy: 17, r: 6.5, fill: '#15803d' },
+        { cx: 15, cy: 40, r: 6.5, fill: '#b91c1c' },
+        { cx: 30, cy: 40, r: 6.5, fill: '#b91c1c' },
+        { cx: 45, cy: 40, r: 6.5, fill: '#b91c1c' },
+        { cx: 15, cy: 63, r: 6.5, fill: '#1d4ed8' },
+        { cx: 30, cy: 63, r: 6.5, fill: '#1d4ed8' },
+        { cx: 45, cy: 63, r: 6.5, fill: '#1d4ed8' },
+      ],
+    };
+
+    const dots = dotLayouts[tile.value] || [];
+    return (
+      <svg viewBox="0 0 60 80" className="w-full h-full p-0.5">
+        {dots.map((d, i) => (
+          <g key={i}>
+            <circle
+              cx={d.cx}
+              cy={d.cy}
+              r={d.r}
+              fill={d.fill}
+              stroke="#fffdf7"
+              strokeWidth="1.2"
+            />
+            <circle
+              cx={d.cx}
+              cy={d.cy}
+              r={d.r * 0.55}
+              fill="none"
+              stroke="#fffdf7"
+              strokeWidth="1.3"
+              strokeDasharray="2.5 2"
+            />
+            <circle cx={d.cx} cy={d.cy} r={d.r * 0.2} fill="#fffdf7" />
+          </g>
+        ))}
+      </svg>
+    );
+  }
+
+  // 3. SUIT: BAMBOO (SOU) -> Batang Bambu Beruas Hijau & Merah
+  if (tile.suit === 'sou') {
+    const sticks: Record<
+      number,
+      { x: number; y: number; h: number; fill: string }[]
+    > = {
+      1: [{ x: 26, y: 16, h: 48, fill: '#b91c1c' }],
+      2: [
+        { x: 27, y: 12, h: 25, fill: '#15803d' },
+        { x: 27, y: 43, h: 25, fill: '#15803d' },
+      ],
+      3: [
+        { x: 27, y: 12, h: 25, fill: '#15803d' },
+        { x: 16, y: 43, h: 25, fill: '#15803d' },
+        { x: 38, y: 43, h: 25, fill: '#15803d' },
+      ],
+      4: [
+        { x: 17, y: 12, h: 25, fill: '#15803d' },
+        { x: 37, y: 12, h: 25, fill: '#15803d' },
+        { x: 17, y: 43, h: 25, fill: '#15803d' },
+        { x: 37, y: 43, h: 25, fill: '#15803d' },
+      ],
+      5: [
+        { x: 13, y: 12, h: 25, fill: '#15803d' },
+        { x: 41, y: 12, h: 25, fill: '#15803d' },
+        { x: 27, y: 27, h: 26, fill: '#b91c1c' },
+        { x: 13, y: 43, h: 25, fill: '#15803d' },
+        { x: 41, y: 43, h: 25, fill: '#15803d' },
+      ],
+      6: [
+        { x: 14, y: 12, h: 25, fill: '#15803d' },
+        { x: 27, y: 12, h: 25, fill: '#15803d' },
+        { x: 40, y: 12, h: 25, fill: '#15803d' },
+        { x: 14, y: 43, h: 25, fill: '#15803d' },
+        { x: 27, y: 43, h: 25, fill: '#15803d' },
+        { x: 40, y: 43, h: 25, fill: '#15803d' },
+      ],
+      7: [
+        { x: 27, y: 8, h: 19, fill: '#b91c1c' },
+        { x: 14, y: 31, h: 19, fill: '#15803d' },
+        { x: 27, y: 31, h: 19, fill: '#15803d' },
+        { x: 40, y: 31, h: 19, fill: '#15803d' },
+        { x: 14, y: 53, h: 19, fill: '#15803d' },
+        { x: 27, y: 53, h: 19, fill: '#15803d' },
+        { x: 40, y: 53, h: 19, fill: '#15803d' },
+      ],
+      8: [
+        { x: 13, y: 10, h: 18, fill: '#15803d' },
+        { x: 27, y: 10, h: 18, fill: '#15803d' },
+        { x: 41, y: 10, h: 18, fill: '#15803d' },
+        { x: 19, y: 31, h: 18, fill: '#b91c1c' },
+        { x: 35, y: 31, h: 18, fill: '#b91c1c' },
+        { x: 13, y: 52, h: 18, fill: '#15803d' },
+        { x: 27, y: 52, h: 18, fill: '#15803d' },
+        { x: 41, y: 52, h: 18, fill: '#15803d' },
+      ],
+      9: [
+        { x: 13, y: 10, h: 18, fill: '#b91c1c' },
+        { x: 27, y: 10, h: 18, fill: '#15803d' },
+        { x: 41, y: 10, h: 18, fill: '#15803d' },
+        { x: 13, y: 31, h: 18, fill: '#b91c1c' },
+        { x: 27, y: 31, h: 18, fill: '#15803d' },
+        { x: 41, y: 31, h: 18, fill: '#15803d' },
+        { x: 13, y: 52, h: 18, fill: '#b91c1c' },
+        { x: 27, y: 52, h: 18, fill: '#15803d' },
+        { x: 41, y: 52, h: 18, fill: '#15803d' },
+      ],
+    };
+
+    const items = sticks[tile.value] || [];
+    return (
+      <svg viewBox="0 0 60 80" className="w-full h-full p-0.5">
+        {items.map((s, i) => (
+          <g key={i}>
+            <rect
+              x={s.x}
+              y={s.y}
+              width={tile.value === 1 ? 8 : 6}
+              height={s.h}
+              rx={3}
+              fill={s.fill}
+            />
+            <line
+              x1={s.x}
+              y1={s.y + s.h / 2}
+              x2={s.x + (tile.value === 1 ? 8 : 6)}
+              y2={s.y + s.h / 2}
+              stroke="#fffdf7"
+              strokeWidth="1.5"
+            />
+            <line
+              x1={s.x + (tile.value === 1 ? 4 : 3)}
+              y1={s.y + 3}
+              x2={s.x + (tile.value === 1 ? 4 : 3)}
+              y2={s.y + s.h - 3}
+              stroke="#fffdf7"
+              strokeWidth="1"
+              opacity="0.7"
+            />
+          </g>
+        ))}
+      </svg>
+    );
+  }
+
+  // 4. WINDS -> Kanji Biru Klasik
+  if (tile.suit === 'wind') {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#1e40af]">
+          {WIND_KANJI[tile.value - 1]}
+        </span>
+      </div>
+    );
+  }
+
+  // 5. DRAGONS -> Red (中), Green (發), White (Bingkai Biru Klasik)
+  if (tile.value === 1) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#b91c1c]">
+          中
+        </span>
+      </div>
+    );
+  }
+  if (tile.value === 2) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#15803d]">
+          發
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="w-full h-full p-1.5 flex items-center justify-center">
+      <div className="w-full h-full border-[2.5px] border-[#1d4ed8] rounded-sm relative">
+        <div className="absolute inset-0.5 border border-[#1d4ed8]/60" />
+      </div>
+    </div>
+  );
+}
+
 export default function MahjongTable({
   profile,
   room,
@@ -189,6 +446,17 @@ export default function MahjongTable({
   const isHost = room.host_id === profile.id;
 
   const [gameState, setGameState] = useState<GameStatePayload | null>(null);
+  const gameStateRef = useRef<GameStatePayload | null>(null);
+  const livePlayersRef = useRef<any[]>(players);
+
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
+
+  useEffect(() => {
+    livePlayersRef.current = livePlayers;
+  }, [livePlayers]);
+
   const [drawnTileId, setDrawnTileId] = useState<string | null>(null);
   const [tableTilt, setTableTilt] = useState<boolean>(false);
   const [inspectedTile, setInspectedTile] = useState<Tile | null>(null);
@@ -228,6 +496,7 @@ export default function MahjongTable({
   const pushStateToSupabase = useCallback(
     async (nextState: GameStatePayload) => {
       setGameState(nextState);
+      gameStateRef.current = nextState;
       await supabase.from('game_states').upsert({
         room_id: room.id,
         current_turn: nextState.turn,
@@ -291,7 +560,7 @@ export default function MahjongTable({
     await pushStateToSupabase(freshState);
   }, [pushStateToSupabase]);
 
-  // Sinkronisasi Realtime + Polling 1.2 detik agar pemain kedua tidak pernah stuck
+  // Sinkronisasi Realtime + Polling 1.5 detik
   useEffect(() => {
     let isMounted = true;
 
@@ -325,7 +594,7 @@ export default function MahjongTable({
     }
 
     syncFromServer();
-    const pollInterval = setInterval(syncFromServer, 1200);
+    const pollInterval = setInterval(syncFromServer, 1500);
 
     const channel = supabase
       .channel(`game_state_${room.id}`)
@@ -438,19 +707,25 @@ export default function MahjongTable({
     }
   }, [gameState, mySeat]);
 
-  // Tempo Bot AI santai (2.6 detik per giliran)
-  useEffect(() => {
-    if (!isHost || !gameState || gameState.winnerInfo) return;
+  // FIX ANTI-STUCK: Timer Bot AI tidak akan ter-reset oleh polling 1.5 detik
+  const activeTurn = gameState?.turn;
+  const isRoundOver = Boolean(gameState?.winnerInfo);
 
-    const currentSeatObj = livePlayers.find(
-      (p) => p.seat_index === gameState.turn
+  useEffect(() => {
+    if (!isHost || activeTurn === undefined || isRoundOver) return;
+
+    const currentSeatObj = livePlayersRef.current.find(
+      (p) => p.seat_index === activeTurn
     );
     if (!currentSeatObj || !currentSeatObj.is_bot) return;
 
     const timer = setTimeout(async () => {
-      if (gameState.wall.length === 0) {
+      const latest = gameStateRef.current;
+      if (!latest || latest.winnerInfo || latest.turn !== activeTurn) return;
+
+      if (latest.wall.length === 0) {
         await pushStateToSupabase({
-          ...gameState,
+          ...latest,
           winnerInfo: {
             seat: -1,
             name: 'Draw Game (Dinding Habis)',
@@ -460,19 +735,19 @@ export default function MahjongTable({
         return;
       }
 
-      const nextWall = [...gameState.wall];
+      const nextWall = [...latest.wall];
       const drawn = nextWall.pop()!;
-      const seatKey = String(gameState.turn);
-      const botHand = [...(gameState.hands[seatKey] || []), drawn];
-      const botMelds = gameState.melds[seatKey] || [];
+      const seatKey = String(activeTurn);
+      const botHand = [...(latest.hands[seatKey] || []), drawn];
+      const botMelds = latest.melds[seatKey] || [];
 
       if (canWin(botHand, botMelds.length)) {
-        const botName = currentSeatObj.bot_name || `Bot ${gameState.turn + 1}`;
+        const botName = currentSeatObj.bot_name || `Bot ${activeTurn + 1}`;
         await pushStateToSupabase({
-          ...gameState,
+          ...latest,
           wall: nextWall,
-          hands: { ...gameState.hands, [seatKey]: sortHand(botHand) },
-          winnerInfo: { seat: gameState.turn, name: botName, faan: 2 },
+          hands: { ...latest.hands, [seatKey]: sortHand(botHand) },
+          winnerInfo: { seat: activeTurn, name: botName, faan: 2 },
         });
         return;
       }
@@ -482,20 +757,26 @@ export default function MahjongTable({
       const remaining = sortHand(botHand.filter((_, i) => i !== discardIdx));
 
       await pushStateToSupabase({
-        ...gameState,
+        ...latest,
         wall: nextWall,
-        hands: { ...gameState.hands, [seatKey]: remaining },
-        discards: [...gameState.discards, discarded],
-        turn: (gameState.turn + 1) % 4,
+        hands: { ...latest.hands, [seatKey]: remaining },
+        discards: [...latest.discards, discarded],
+        turn: (activeTurn + 1) % 4,
         mustDraw: true,
       });
-    }, 2600);
+    }, 2400);
 
     return () => clearTimeout(timer);
-  }, [isHost, gameState, livePlayers, pushStateToSupabase]);
+  }, [isHost, activeTurn, isRoundOver, pushStateToSupabase]);
 
   const handleManualDraw = async () => {
-    if (!gameState || gameState.turn !== mySeat || !gameState.mustDraw || gameState.winnerInfo) return;
+    if (
+      !gameState ||
+      gameState.turn !== mySeat ||
+      !gameState.mustDraw ||
+      gameState.winnerInfo
+    )
+      return;
 
     if (gameState.wall.length === 0) {
       await pushStateToSupabase({
@@ -651,7 +932,7 @@ export default function MahjongTable({
 
   return (
     <div className="min-h-[100dvh] bg-[radial-gradient(circle_at_center,#291d14_0%,#090705_100%)] text-stone-100 flex flex-col justify-between overflow-x-hidden select-none">
-      {/* HUD ATAS RESPONSIF MOBILE */}
+      {/* HUD ATAS RESPONSIF */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2 bg-black/60 border-b border-amber-500/20 backdrop-blur-sm z-20">
         <div className="flex items-center gap-2">
           <button
@@ -667,7 +948,8 @@ export default function MahjongTable({
 
         <div className="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-xs">
           <span className="text-stone-300">
-            Dinding: <strong className="text-amber-300">{gameState.wall.length}</strong>
+            Dinding:{' '}
+            <strong className="text-amber-300">{gameState.wall.length}</strong>
           </span>
           <span
             className={`px-2 py-1 rounded border font-semibold truncate max-w-[170px] sm:max-w-none ${
@@ -678,15 +960,17 @@ export default function MahjongTable({
           >
             {gameState.turn === mySeat
               ? 'Giliran Anda!'
-              : `${getSeatName(gameState.turn)}${isBotThinking ? ' berpikir...' : ''}`}
+              : `${getSeatName(gameState.turn)}${
+                  isBotThinking ? ' berpikir...' : ''
+                }`}
           </span>
         </div>
       </div>
 
-      {/* AREA MEJA 3D RESPONSIF */}
+      {/* AREA MEJA 3D */}
       <div className="relative flex-1 flex items-center justify-center p-1.5 sm:p-3 [perspective:1100px]">
         <div
-          className={`relative w-full max-w-4xl min-h-[430px] sm:h-[520px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2.5 sm:p-5 ${
+          className={`relative w-full max-w-4xl min-h-[440px] sm:h-[530px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2.5 sm:p-5 ${
             tableTilt ? 'sm:[transform:rotateX(20deg)]' : ''
           }`}
         >
@@ -734,8 +1018,8 @@ export default function MahjongTable({
               </div>
             </div>
 
-            {/* Kolam Tengah (Discard Pile) */}
-            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[140px] sm:min-h-[175px] max-h-[210px] overflow-y-auto bg-black/25 border border-emerald-400/15 rounded-xl p-1.5 sm:p-2.5 flex flex-wrap content-start gap-1 shadow-inner">
+            {/* Kolam Tengah (Discard Pile) dengan Visual Batu Klasik */}
+            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[145px] sm:min-h-[185px] max-h-[220px] overflow-y-auto bg-black/25 border border-emerald-400/15 rounded-xl p-1.5 sm:p-2.5 flex flex-wrap content-start gap-1 shadow-inner">
               {gameState.discards.length === 0 && (
                 <div className="w-full h-32 flex items-center justify-center text-[11px] text-emerald-200/30 italic text-center">
                   Kolam Buangan Tengah Meja
@@ -746,20 +1030,13 @@ export default function MahjongTable({
                   key={`${tile.id}_${idx}`}
                   onClick={() => setInspectedTile(tile)}
                   onMouseEnter={() => setInspectedTile(tile)}
-                  className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#fffdf7] to-[#e8dfc8] border border-stone-400 shadow flex flex-col items-center justify-center leading-none hover:scale-110 transition ${
-                    tile.color
-                  } ${
+                  className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#faf6eb] to-[#e9dec4] border border-stone-400 border-b-2 border-b-stone-500 shadow flex items-center justify-center hover:scale-110 transition overflow-hidden ${
                     idx === gameState.discards.length - 1
                       ? 'ring-2 ring-amber-400'
                       : ''
                   }`}
                 >
-                  <span className="text-[11px] sm:text-xs font-bold">
-                    {tile.label}
-                  </span>
-                  <span className="text-[7px] sm:text-[8px] opacity-70">
-                    {tile.sub[0]}
-                  </span>
+                  <TileFace tile={tile} />
                 </button>
               ))}
             </div>
@@ -802,10 +1079,11 @@ export default function MahjongTable({
                   <button
                     key={tile.id}
                     onClick={() => handleDiscard(tile)}
+                    onMouseEnter={() => setInspectedTile(tile)}
                     disabled={!canClickDiscard}
-                    className={`w-8 h-12 sm:w-10 sm:h-14 rounded-md bg-gradient-to-b from-[#fffef9] via-[#f7f0dc] to-[#dfd3b6] border-b-[3px] sm:border-b-4 border-emerald-800 shadow-lg flex flex-col items-center justify-center transition-transform ${
-                      tile.color
-                    } ${isDrawn ? 'ml-1.5 sm:ml-3 ring-2 ring-amber-400' : ''} ${
+                    className={`w-8 h-12 sm:w-10 sm:h-14 rounded-md bg-gradient-to-b from-[#fcf9f0] via-[#f5eedc] to-[#e3d6b8] border border-stone-300 border-b-[3px] sm:border-b-4 border-b-emerald-800 shadow-lg flex items-center justify-center transition-transform overflow-hidden ${
+                      isDrawn ? 'ml-1.5 sm:ml-3 ring-2 ring-amber-400' : ''
+                    } ${
                       isHighlighted ? 'ring-2 ring-amber-400 -translate-y-2' : ''
                     } ${
                       canClickDiscard
@@ -813,12 +1091,7 @@ export default function MahjongTable({
                         : 'opacity-95 cursor-default'
                     }`}
                   >
-                    <span className="text-sm sm:text-lg font-extrabold leading-none">
-                      {tile.label}
-                    </span>
-                    <span className="text-[7px] sm:text-[9px] font-semibold mt-0.5 opacity-75">
-                      {tile.sub}
-                    </span>
+                    <TileFace tile={tile} />
                   </button>
                 );
               })}
@@ -831,9 +1104,9 @@ export default function MahjongTable({
                     {m.tiles.map((t, ti) => (
                       <div
                         key={ti}
-                        className={`w-6 h-9 sm:w-7 sm:h-10 rounded bg-[#f7f0dc] border border-stone-400 flex flex-col items-center justify-center text-[11px] sm:text-xs font-bold ${t.color}`}
+                        className="w-6 h-9 sm:w-7 sm:h-10 rounded bg-[#f5eedc] border border-stone-400 flex items-center justify-center overflow-hidden"
                       >
-                        <span>{t.label}</span>
+                        <TileFace tile={t} />
                       </div>
                     ))}
                   </div>
@@ -844,7 +1117,7 @@ export default function MahjongTable({
         </div>
       </div>
 
-      {/* PANEL AKSI BAWAH RESPONSIF */}
+      {/* PANEL AKSI BAWAH */}
       <div className="bg-stone-950/95 border-t border-amber-500/20 px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 z-20">
         <div className="flex items-center gap-2">
           <button
@@ -857,11 +1130,8 @@ export default function MahjongTable({
 
           {inspectedTile && (
             <div className="text-xs bg-stone-900 border border-stone-700 px-2.5 py-1 rounded-lg flex items-center gap-1.5">
-              <span className={`font-bold ${inspectedTile.color}`}>
-                {inspectedTile.label}
-              </span>
-              <span className="text-stone-400">
-                {inspectedTile.sub} ({inspectedTile.value})
+              <span className="font-bold text-amber-300">
+                {inspectedTile.sub}
               </span>
             </div>
           )}
@@ -900,7 +1170,7 @@ export default function MahjongTable({
           {claimOptions && (
             <div className="flex flex-wrap items-center justify-center gap-1.5 bg-stone-900 border border-amber-400/50 px-2.5 py-1.5 rounded-xl w-full sm:w-auto">
               <span className="text-xs text-amber-200 mr-1">
-                Klaim <strong>{claimOptions.tile.label}</strong>:
+                Klaim <strong>{claimOptions.tile.sub}</strong>:
               </span>
               {claimOptions.canKong && (
                 <button
