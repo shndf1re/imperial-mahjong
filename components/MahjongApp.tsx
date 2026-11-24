@@ -25,7 +25,6 @@ export default function MahjongApp() {
   const [passwordInput, setPasswordInput] = useState('');
   const [authError, setAuthError] = useState('');
 
-  // State Room, Lobby & Permainan
   const [roomCodeInput, setRoomCodeInput] = useState('');
   const [activeRoom, setActiveRoom] = useState<{
     id: string;
@@ -148,30 +147,50 @@ export default function MahjongApp() {
     setIsPlaying(false);
   }
 
-  async function fetchPlayers(roomId: string) {
+  const fetchPlayers = useCallback(async (roomId: string) => {
     const { data } = await supabase
       .from('room_players')
       .select('*, profiles(username, rank_tier, rank_points)')
       .eq('room_id', roomId)
       .order('seat_index', { ascending: true });
-    if (data) setRoomPlayers(data);
-  }
+    if (data) {
+      setRoomPlayers(data);
+      return data;
+    }
+    return [];
+  }, []);
 
-  // Dengarkan perubahan pemain & status room (menunggu -> bermain) secara Real-Time
-  function subscribeRoom(roomId: string) {
-    fetchPlayers(roomId);
+  // Sinkronisasi Waiting Room (Realtime + Polling cadangan setiap 2 detik)
+  useEffect(() => {
+    if (!activeRoom || isPlaying) return;
+
+    fetchPlayers(activeRoom.id);
+
+    const interval = setInterval(async () => {
+      await fetchPlayers(activeRoom.id);
+      const { data: roomCheck } = await supabase
+        .from('rooms')
+        .select('status')
+        .eq('id', activeRoom.id)
+        .single();
+
+      if (roomCheck?.status === 'playing') {
+        await fetchPlayers(activeRoom.id);
+        setIsPlaying(true);
+      }
+    }, 2000);
 
     const channel = supabase
-      .channel(`room_sync_${roomId}`)
+      .channel(`room_sync_${activeRoom.id}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'room_players',
-          filter: `room_id=eq.${roomId}`,
+          filter: `room_id=eq.${activeRoom.id}`,
         },
-        () => fetchPlayers(roomId)
+        () => fetchPlayers(activeRoom.id)
       )
       .on(
         'postgres_changes',
@@ -179,19 +198,22 @@ export default function MahjongApp() {
           event: 'UPDATE',
           schema: 'public',
           table: 'rooms',
-          filter: `id=eq.${roomId}`,
+          filter: `id=eq.${activeRoom.id}`,
         },
         async (payload) => {
           if (payload.new && payload.new.status === 'playing') {
-            await fetchPlayers(roomId);
+            await fetchPlayers(activeRoom.id);
             setIsPlaying(true);
           }
         }
       )
       .subscribe();
 
-    return channel;
-  }
+    return () => {
+      clearInterval(interval);
+      supabase.removeChannel(channel);
+    };
+  }, [activeRoom, isPlaying, fetchPlayers]);
 
   async function createRoom(roomType: 'ranked' | 'private') {
     if (!profile) return;
@@ -221,7 +243,6 @@ export default function MahjongApp() {
       type: roomType,
       host_id: room.host_id,
     });
-    subscribeRoom(room.id);
   }
 
   async function joinPrivateRoom() {
@@ -239,15 +260,11 @@ export default function MahjongApp() {
       return;
     }
 
-    const { data: existingPlayers } = await supabase
-      .from('room_players')
-      .select('*')
-      .eq('room_id', room.id);
+    const existingPlayers = await fetchPlayers(room.id);
+    const alreadyIn = existingPlayers.find((p) => p.user_id === profile.id);
 
-    // Cek jika user sudah terdaftar di room ini
-    const alreadyIn = (existingPlayers || []).find((p) => p.user_id === profile.id);
     if (!alreadyIn) {
-      const takenSeats = (existingPlayers || []).map((p) => p.seat_index);
+      const takenSeats = existingPlayers.map((p) => p.seat_index);
       const availableSeat = [0, 1, 2, 3].find((s) => !takenSeats.includes(s));
 
       if (availableSeat === undefined) {
@@ -255,54 +272,56 @@ export default function MahjongApp() {
         return;
       }
 
-      await supabase.from('room_players').insert({
+      const { error: joinErr } = await supabase.from('room_players').insert({
         room_id: room.id,
         user_id: profile.id,
         seat_index: availableSeat,
         is_bot: false,
         is_ready: true,
       });
+
+      if (joinErr) {
+        alert('Gagal bergabung ke kursi: ' + joinErr.message);
+        return;
+      }
     }
 
+    await fetchPlayers(room.id);
     setActiveRoom({
       id: room.id,
       code: room.room_code,
       type: room.room_type,
       host_id: room.host_id,
     });
-    subscribeRoom(room.id);
   }
 
-  // Hanya Host yang bisa memulai match: isi kursi kosong dengan Bot lalu ubah status room
+  // Host mengisi hanya kursi yang benar-benar kosong dengan Bot AI
   async function startMatchAsHost() {
     if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
 
-    const { data: latestPlayers } = await supabase
-      .from('room_players')
-      .select('*')
-      .eq('room_id', activeRoom.id);
-
+    const latestPlayers = await fetchPlayers(activeRoom.id);
     const botNames = ['Chen Tao (AI)', 'Mei Lin (AI)', 'Kenji Sato (AI)'];
-    const takenSeats = (latestPlayers || []).map((p) => p.seat_index);
+    const takenSeats = latestPlayers.map((p) => p.seat_index);
     const emptySeats = [0, 1, 2, 3].filter((s) => !takenSeats.includes(s));
 
-    for (let i = 0; i < emptySeats.length; i++) {
-      await supabase.from('room_players').insert({
+    if (emptySeats.length > 0) {
+      const botsToInsert = emptySeats.map((seatIdx, idx) => ({
         room_id: activeRoom.id,
         user_id: null,
-        seat_index: emptySeats[i],
+        seat_index: seatIdx,
         is_bot: true,
-        bot_name: botNames[i % botNames.length],
+        bot_name: botNames[idx % botNames.length],
         is_ready: true,
-      });
+      }));
+      await supabase.from('room_players').insert(botsToInsert);
     }
 
+    await fetchPlayers(activeRoom.id);
     await supabase
       .from('rooms')
       .update({ status: 'playing' })
       .eq('id', activeRoom.id);
 
-    await fetchPlayers(activeRoom.id);
     setIsPlaying(true);
   }
 
@@ -328,7 +347,6 @@ export default function MahjongApp() {
     );
   }
 
-  // TAMPILAN 1: LOGIN / MODE GUEST
   if (!profile) {
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_center,#1c1917_0%,#09090b_100%)] text-stone-100 flex items-center justify-center p-4">
@@ -452,7 +470,6 @@ export default function MahjongApp() {
     );
   }
 
-  // TAMPILAN 2: MEJA PERMAINAN 3D MULTIPLAYER REAL-TIME
   if (isPlaying && activeRoom) {
     return (
       <MahjongTable
@@ -467,7 +484,6 @@ export default function MahjongApp() {
 
   const isHost = activeRoom ? activeRoom.host_id === profile.id : false;
 
-  // TAMPILAN 3: LOBBY UTAMA & WAITING ROOM REAL-TIME
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#1c1917_0%,#09090b_100%)] text-stone-100 p-3 sm:p-6">
       <div className="max-w-3xl mx-auto space-y-4 sm:space-y-6">
@@ -507,7 +523,6 @@ export default function MahjongApp() {
           </button>
         </div>
 
-        {/* Jika Belum Masuk Room -> Pilih Mode */}
         {!activeRoom ? (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -563,7 +578,6 @@ export default function MahjongApp() {
               </div>
             </div>
 
-            {/* Papan Peringkat Top 5 */}
             {leaderboard.length > 0 && (
               <div className="bg-stone-900/80 border border-stone-800 rounded-xl p-4 sm:p-5">
                 <div className="flex items-center gap-2 text-amber-300 font-bold text-sm mb-3">
@@ -599,7 +613,6 @@ export default function MahjongApp() {
             )}
           </>
         ) : (
-          /* Waiting Room Real-Time */
           <div className="bg-stone-900 border border-amber-500/30 p-4 sm:p-6 rounded-xl space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>

@@ -183,7 +183,8 @@ export default function MahjongTable({
   onExitRoom,
   onProfileUpdated,
 }: MahjongTableProps) {
-  const myPlayerObj = players.find((p) => p.user_id === profile.id);
+  const [livePlayers, setLivePlayers] = useState<any[]>(players);
+  const myPlayerObj = livePlayers.find((p) => p.user_id === profile.id);
   const mySeat = myPlayerObj ? myPlayerObj.seat_index : 0;
   const isHost = room.host_id === profile.id;
 
@@ -193,6 +194,7 @@ export default function MahjongTable({
   const [inspectedTile, setInspectedTile] = useState<Tile | null>(null);
   const [rpChangeShown, setRpChangeShown] = useState<number | null>(null);
   const recordedWinRef = useRef<string | null>(null);
+  const lastDiscardCountRef = useRef<number>(0);
 
   const [claimOptions, setClaimOptions] = useState<{
     tile: Tile;
@@ -223,7 +225,6 @@ export default function MahjongTable({
     } catch {}
   };
 
-  // Simpan state permainan ke Supabase agar tersinkron ke semua pemain di room
   const pushStateToSupabase = useCallback(
     async (nextState: GameStatePayload) => {
       setGameState(nextState);
@@ -244,7 +245,6 @@ export default function MahjongTable({
     [room.id]
   );
 
-  // Bangun ulang state dari baris database Supabase
   const parseDbRow = useCallback((row: any): GameStatePayload => {
     let meta = { mustDraw: true, winnerInfo: null };
     try {
@@ -263,9 +263,9 @@ export default function MahjongTable({
     };
   }, []);
 
-  // Inisialisasi ronde baru (dijalankan oleh Host)
   const initRound = useCallback(async () => {
     recordedWinRef.current = null;
+    lastDiscardCountRef.current = 0;
     setRpChangeShown(null);
     setClaimOptions(null);
     setDrawnTileId(null);
@@ -291,25 +291,41 @@ export default function MahjongTable({
     await pushStateToSupabase(freshState);
   }, [pushStateToSupabase]);
 
-  // Sinkronisasi awal & langganan Realtime ke tabel game_states
+  // Sinkronisasi Realtime + Polling 1.2 detik agar pemain kedua tidak pernah stuck
   useEffect(() => {
     let isMounted = true;
 
-    async function loadInitialState() {
-      const { data } = await supabase
-        .from('game_states')
-        .select('*')
-        .eq('room_id', room.id)
-        .maybeSingle();
+    async function syncFromServer() {
+      const [{ data: stateRow }, { data: pRows }] = await Promise.all([
+        supabase
+          .from('game_states')
+          .select('*')
+          .eq('room_id', room.id)
+          .maybeSingle(),
+        supabase
+          .from('room_players')
+          .select('*, profiles(username, rank_tier, rank_points)')
+          .eq('room_id', room.id)
+          .order('seat_index', { ascending: true }),
+      ]);
 
-      if (data && isMounted) {
-        setGameState(parseDbRow(data));
-      } else if (isHost && isMounted) {
+      if (!isMounted) return;
+      if (pRows && pRows.length > 0) setLivePlayers(pRows);
+
+      if (stateRow) {
+        const parsed = parseDbRow(stateRow);
+        if (parsed.discards.length > lastDiscardCountRef.current) {
+          playTileClick();
+        }
+        lastDiscardCountRef.current = parsed.discards.length;
+        setGameState(parsed);
+      } else if (isHost) {
         await initRound();
       }
     }
 
-    loadInitialState();
+    syncFromServer();
+    const pollInterval = setInterval(syncFromServer, 1200);
 
     const channel = supabase
       .channel(`game_state_${room.id}`)
@@ -324,7 +340,10 @@ export default function MahjongTable({
         (payload) => {
           if (payload.new && isMounted) {
             const incoming = parseDbRow(payload.new);
-            playTileClick();
+            if (incoming.discards.length > lastDiscardCountRef.current) {
+              playTileClick();
+            }
+            lastDiscardCountRef.current = incoming.discards.length;
             setGameState(incoming);
           }
         }
@@ -333,11 +352,11 @@ export default function MahjongTable({
 
     return () => {
       isMounted = false;
+      clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
   }, [room.id, isHost, initRound, parseDbRow]);
 
-  // Update RP otomatis untuk masing-masing pemain saat pertandingan selesai
   useEffect(() => {
     if (!gameState?.winnerInfo) {
       recordedWinRef.current = null;
@@ -369,7 +388,6 @@ export default function MahjongTable({
       .then(() => onProfileUpdated());
   }, [gameState, mySeat, profile, room.type, onProfileUpdated]);
 
-  // Evaluasi apakah pemain lokal bisa mengklaim buangan lawan
   useEffect(() => {
     if (!gameState || gameState.winnerInfo || !gameState.mustDraw) {
       setClaimOptions(null);
@@ -377,7 +395,6 @@ export default function MahjongTable({
     }
     if (gameState.discards.length === 0) return;
 
-    // Siapa yang baru saja membuang kartu? Kursi sebelum current_turn
     const lastDiscarder = (gameState.turn + 3) % 4;
     if (lastDiscarder === mySeat) return;
 
@@ -391,7 +408,6 @@ export default function MahjongTable({
     const canKong = same.length >= 3;
 
     const chiCombos: Tile[][] = [];
-    // Chi hanya boleh dari pemain tepat sebelum giliran kita (seat - 1)
     const leftSeat = (mySeat + 3) % 4;
     if (
       lastDiscarder === leftSeat &&
@@ -422,11 +438,11 @@ export default function MahjongTable({
     }
   }, [gameState, mySeat]);
 
-  // Eksekusi giliran Bot AI (hanya dijalankan oleh Host agar tidak bentrok)
+  // Tempo Bot AI santai (2.6 detik per giliran)
   useEffect(() => {
     if (!isHost || !gameState || gameState.winnerInfo) return;
 
-    const currentSeatObj = players.find(
+    const currentSeatObj = livePlayers.find(
       (p) => p.seat_index === gameState.turn
     );
     if (!currentSeatObj || !currentSeatObj.is_bot) return;
@@ -473,12 +489,11 @@ export default function MahjongTable({
         turn: (gameState.turn + 1) % 4,
         mustDraw: true,
       });
-    }, 1100);
+    }, 2600);
 
     return () => clearTimeout(timer);
-  }, [isHost, gameState, players, pushStateToSupabase]);
+  }, [isHost, gameState, livePlayers, pushStateToSupabase]);
 
-  // Aksi Draw Manual oleh Pemain Lokal
   const handleManualDraw = async () => {
     if (!gameState || gameState.turn !== mySeat || !gameState.mustDraw || gameState.winnerInfo) return;
 
@@ -507,7 +522,6 @@ export default function MahjongTable({
     });
   };
 
-  // Pemain membuang batu ke tengah meja
   const handleDiscard = async (tile: Tile) => {
     if (
       !gameState ||
@@ -534,7 +548,6 @@ export default function MahjongTable({
     });
   };
 
-  // Eksekusi Klaim (Pong / Kong / Chi)
   const executeClaim = async (
     type: 'PONG' | 'KONG' | 'CHI',
     pairTiles?: Tile[]
@@ -577,7 +590,6 @@ export default function MahjongTable({
     });
   };
 
-  // Deklarasi Menang (HU)
   const declareWin = async () => {
     if (!gameState) return;
     playTileClick();
@@ -598,7 +610,6 @@ export default function MahjongTable({
     );
   }
 
-  // Rotasi kursi relatif terhadap pemain lokal (mySeat selalu berada di bawah)
   const bottomSeat = mySeat;
   const rightSeat = (mySeat + 1) % 4;
   const topSeat = (mySeat + 2) % 4;
@@ -606,13 +617,18 @@ export default function MahjongTable({
 
   const getSeatName = (seatIdx: number) => {
     if (seatIdx === mySeat) return `${profile.username} (Anda)`;
-    const found = players.find((p) => p.seat_index === seatIdx);
+    const found = livePlayers.find((p) => p.seat_index === seatIdx);
     return found
       ? found.is_bot
         ? found.bot_name
         : found.profiles?.username
       : `Player ${seatIdx + 1}`;
   };
+
+  const currentTurnObj = livePlayers.find(
+    (p) => p.seat_index === gameState.turn
+  );
+  const isBotThinking = Boolean(currentTurnObj?.is_bot);
 
   const myHand = gameState.hands[String(bottomSeat)] || [];
   const myMelds = gameState.melds[String(bottomSeat)] || [];
@@ -654,7 +670,7 @@ export default function MahjongTable({
             Dinding: <strong className="text-amber-300">{gameState.wall.length}</strong>
           </span>
           <span
-            className={`px-2 py-1 rounded border font-semibold truncate max-w-[140px] sm:max-w-none ${
+            className={`px-2 py-1 rounded border font-semibold truncate max-w-[170px] sm:max-w-none ${
               gameState.turn === mySeat
                 ? 'bg-amber-500 text-stone-950 border-amber-300'
                 : 'bg-emerald-950 border-emerald-500/40 text-emerald-300'
@@ -662,7 +678,7 @@ export default function MahjongTable({
           >
             {gameState.turn === mySeat
               ? 'Giliran Anda!'
-              : `Giliran: ${getSeatName(gameState.turn)}`}
+              : `${getSeatName(gameState.turn)}${isBotThinking ? ' berpikir...' : ''}`}
           </span>
         </div>
       </div>
@@ -695,7 +711,7 @@ export default function MahjongTable({
             </div>
           </div>
 
-          {/* TENGAH MEJA: LAWAN KIRI/KANAN + KOLAM BUANGAN */}
+          {/* TENGAH MEJA */}
           <div className="flex items-center justify-between flex-1 my-1.5 sm:my-2 gap-1.5 sm:gap-3">
             {/* Lawan Kiri */}
             <div className="flex flex-col items-center gap-1.5 shrink-0">
@@ -770,9 +786,8 @@ export default function MahjongTable({
             </div>
           </div>
 
-          {/* AREA PEMAIN BAWAH (TANGAN TERBUKA + MELD) */}
+          {/* AREA PEMAIN BAWAH */}
           <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2 pt-2 border-t border-emerald-400/20">
-            {/* Tangan Pemain */}
             <div className="flex items-end justify-center sm:justify-start gap-1 flex-wrap">
               {myHand.map((tile) => {
                 const isDrawn = tile.id === drawnTileId;
@@ -809,7 +824,6 @@ export default function MahjongTable({
               })}
             </div>
 
-            {/* Meld Set Terbuka */}
             {myMelds.length > 0 && (
               <div className="flex justify-center sm:justify-end gap-1.5 bg-black/30 p-1.5 rounded-lg border border-amber-400/20 overflow-x-auto">
                 {myMelds.map((m, idx) => (
