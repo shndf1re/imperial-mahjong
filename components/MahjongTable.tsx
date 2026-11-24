@@ -2,7 +2,19 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase, UserProfile } from '@/lib/supabase';
-import { ArrowLeft, RotateCcw, Sparkles, Eye, Trophy, Dices } from 'lucide-react';
+import {
+  ArrowLeft,
+  RotateCcw,
+  Sparkles,
+  Eye,
+  Trophy,
+  Dices,
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Trash2,
+} from 'lucide-react';
 
 export interface Tile {
   id: string;
@@ -33,6 +45,7 @@ interface GameStatePayload {
   discards: Tile[];
   turn: number;
   mustDraw: boolean;
+  turnStartedAt?: number;
   diceInfo: DiceRollInfo;
   winnerInfo: {
     seat: number;
@@ -54,6 +67,7 @@ const WIND_KANJI = ['東', '南', '西', '北'];
 const WIND_NAMES = ['East', 'South', 'West', 'North'];
 const DRAGON_KANJI = ['中', '發', '白'];
 const DRAGON_NAMES = ['Red Dragon', 'Green Dragon', 'White Dragon'];
+const TURN_LIMIT_SECONDS = 60;
 
 function rollThreeDice(): number[] {
   return [
@@ -191,15 +205,23 @@ function canWin(hand: Tile[], meldCount: number): boolean {
   return false;
 }
 
-/* KOMPONEN VISUAL BATU MAHJONG KLASIK (DOTS, BAMBOO, SYMBOLS, WINDS, DRAGONS) */
-function TileFace({ tile }: { tile: Tile }) {
+/* KOMPONEN VISUAL BATU MAHJONG KLASIK */
+function TileFace({ tile, compact = false }: { tile: Tile; compact?: boolean }) {
   if (tile.suit === 'man') {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center leading-none py-0.5">
-        <span className="text-[13px] sm:text-[17px] font-serif font-extrabold text-[#1d4ed8]">
+        <span
+          className={`${
+            compact ? 'text-[10px]' : 'text-[13px] sm:text-[17px]'
+          } font-serif font-extrabold text-[#1d4ed8]`}
+        >
           {MAN_KANJI[tile.value - 1]}
         </span>
-        <span className="text-[12px] sm:text-[15px] font-serif font-extrabold text-[#b91c1c] mt-0.5">
+        <span
+          className={`${
+            compact ? 'text-[9px]' : 'text-[12px] sm:text-[15px]'
+          } font-serif font-extrabold text-[#b91c1c] mt-0.5`}
+        >
           萬
         </span>
       </div>
@@ -410,7 +432,11 @@ function TileFace({ tile }: { tile: Tile }) {
   if (tile.suit === 'wind') {
     return (
       <div className="w-full h-full flex items-center justify-center">
-        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#1e40af]">
+        <span
+          className={`${
+            compact ? 'text-xs' : 'text-xl sm:text-2xl'
+          } font-serif font-extrabold text-[#1e40af]`}
+        >
           {WIND_KANJI[tile.value - 1]}
         </span>
       </div>
@@ -420,7 +446,11 @@ function TileFace({ tile }: { tile: Tile }) {
   if (tile.value === 1) {
     return (
       <div className="w-full h-full flex items-center justify-center">
-        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#b91c1c]">
+        <span
+          className={`${
+            compact ? 'text-xs' : 'text-xl sm:text-2xl'
+          } font-serif font-extrabold text-[#b91c1c]`}
+        >
           中
         </span>
       </div>
@@ -429,17 +459,56 @@ function TileFace({ tile }: { tile: Tile }) {
   if (tile.value === 2) {
     return (
       <div className="w-full h-full flex items-center justify-center">
-        <span className="text-xl sm:text-2xl font-serif font-extrabold text-[#15803d]">
+        <span
+          className={`${
+            compact ? 'text-xs' : 'text-xl sm:text-2xl'
+          } font-serif font-extrabold text-[#15803d]`}
+        >
           發
         </span>
       </div>
     );
   }
   return (
-    <div className="w-full h-full p-1.5 flex items-center justify-center">
-      <div className="w-full h-full border-[2.5px] border-[#1d4ed8] rounded-sm relative">
+    <div className="w-full h-full p-1 flex items-center justify-center">
+      <div className="w-full h-full border-[2px] border-[#1d4ed8] rounded-sm relative">
         <div className="absolute inset-0.5 border border-[#1d4ed8]/60" />
       </div>
+    </div>
+  );
+}
+
+/* MELD TERBUKA MILIK PEMAIN / LAWAN */
+function MeldStrip({
+  melds,
+  vertical = false,
+}: {
+  melds: Meld[];
+  vertical?: boolean;
+}) {
+  if (!melds || melds.length === 0) return null;
+  return (
+    <div
+      className={`flex ${
+        vertical ? 'flex-col' : 'flex-row flex-wrap'
+      } gap-1 bg-black/35 p-1 rounded-lg border border-amber-400/25`}
+    >
+      {melds.map((m, idx) => (
+        <div
+          key={idx}
+          className={`flex ${vertical ? 'flex-row' : 'flex-row'} gap-0.5`}
+          title={m.type}
+        >
+          {m.tiles.map((t, ti) => (
+            <div
+              key={ti}
+              className="w-5 h-7 sm:w-6 sm:h-8 rounded bg-[#f5eedc] border border-stone-400 flex items-center justify-center overflow-hidden shadow-sm"
+            >
+              <TileFace tile={t} compact />
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -460,6 +529,11 @@ export default function MahjongTable({
   const gameStateRef = useRef<GameStatePayload | null>(null);
   const livePlayersRef = useRef<any[]>(players);
   const botBusyRef = useRef<boolean>(false);
+  const onProfileUpdatedRef = useRef(onProfileUpdated);
+
+  useEffect(() => {
+    onProfileUpdatedRef.current = onProfileUpdated;
+  }, [onProfileUpdated]);
 
   useEffect(() => {
     gameStateRef.current = gameState;
@@ -469,12 +543,20 @@ export default function MahjongTable({
     livePlayersRef.current = livePlayers;
   }, [livePlayers]);
 
+  // Urutan kartu tangan pribadi yang bisa disusun manual oleh pemain
+  const [customOrderIds, setCustomOrderIds] = useState<string[]>([]);
+  const [selectedTileId, setSelectedTileId] = useState<string | null>(null);
+  const [draggedTileId, setDraggedTileId] = useState<string | null>(null);
+
   const [drawnTileId, setDrawnTileId] = useState<string | null>(null);
   const [tableTilt, setTableTilt] = useState<boolean>(false);
   const [inspectedTile, setInspectedTile] = useState<Tile | null>(null);
   const [rpChangeShown, setRpChangeShown] = useState<number | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState<number>(TURN_LIMIT_SECONDS);
+
   const recordedWinRef = useRef<string | null>(null);
   const lastDiscardCountRef = useRef<number>(0);
+  const autoTimeoutTriggeredRef = useRef<string | null>(null);
 
   const [claimOptions, setClaimOptions] = useState<{
     tile: Tile;
@@ -518,6 +600,7 @@ export default function MahjongTable({
         player_melds: nextState.melds,
         round_wind: JSON.stringify({
           mustDraw: nextState.mustDraw,
+          turnStartedAt: nextState.turnStartedAt ?? Date.now(),
           diceInfo: nextState.diceInfo,
           winnerInfo: nextState.winnerInfo,
         }),
@@ -530,10 +613,12 @@ export default function MahjongTable({
   const parseDbRow = useCallback((row: any): GameStatePayload => {
     let meta: {
       mustDraw: boolean;
+      turnStartedAt?: number;
       diceInfo?: DiceRollInfo;
       winnerInfo: any;
     } = {
       mustDraw: true,
+      turnStartedAt: Date.now(),
       winnerInfo: null,
     };
     try {
@@ -556,19 +641,77 @@ export default function MahjongTable({
       discards: row.discard_pile || [],
       turn: row.current_turn ?? 0,
       mustDraw: meta.mustDraw,
+      turnStartedAt: meta.turnStartedAt || Date.now(),
       diceInfo: meta.diceInfo || defaultDice,
       winnerInfo: meta.winnerInfo,
     };
   }, []);
 
-  // Inisialisasi ronde baru dengan FASE LEMPAR DADU (Dice Roll)
+  // Sinkronisasi urutan kartu pribadi saat tangan bertambah / berkurang
+  const rawMyHand = gameState?.hands?.[String(mySeat)] || [];
+  useEffect(() => {
+    if (rawMyHand.length === 0) {
+      setCustomOrderIds([]);
+      return;
+    }
+    setCustomOrderIds((prev) => {
+      const currentMap = new Map(rawMyHand.map((t) => [t.id, t]));
+      const kept = prev.filter((id) => currentMap.has(id));
+      const keptSet = new Set(kept);
+      const newlyAdded = rawMyHand
+        .filter((t) => !keptSet.has(t.id))
+        .map((t) => t.id);
+      return [...kept, ...newlyAdded];
+    });
+  }, [rawMyHand]);
+
+  const orderedMyHand: Tile[] = React.useMemo(() => {
+    if (customOrderIds.length === 0) return rawMyHand;
+    const map = new Map(rawMyHand.map((t) => [t.id, t]));
+    const res: Tile[] = [];
+    customOrderIds.forEach((id) => {
+      const found = map.get(id);
+      if (found) {
+        res.push(found);
+        map.delete(id);
+      }
+    });
+    map.forEach((t) => res.push(t));
+    return res;
+  }, [rawMyHand, customOrderIds]);
+
+  const moveTilePosition = (fromIndex: number, toIndex: number) => {
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= orderedMyHand.length ||
+      toIndex >= orderedMyHand.length ||
+      fromIndex === toIndex
+    )
+      return;
+    const next = [...orderedMyHand];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    setCustomOrderIds(next.map((t) => t.id));
+    playTileClick();
+  };
+
+  const handleAutoSortMyHand = () => {
+    const sorted = sortHand(orderedMyHand);
+    setCustomOrderIds(sorted.map((t) => t.id));
+    playTileClick();
+  };
+
+  // Inisialisasi ronde baru dengan FASE LEMPAR DADU
   const initRound = useCallback(async () => {
     recordedWinRef.current = null;
     lastDiscardCountRef.current = 0;
     botBusyRef.current = false;
+    autoTimeoutTriggeredRef.current = null;
     setRpChangeShown(null);
     setClaimOptions(null);
     setDrawnTileId(null);
+    setSelectedTileId(null);
 
     const { data: latestP } = await supabase
       .from('room_players')
@@ -602,6 +745,7 @@ export default function MahjongTable({
       discards: [],
       turn: 0,
       mustDraw: true,
+      turnStartedAt: Date.now(),
       diceInfo: {
         phase: 'rolling',
         rolls: initialRolls,
@@ -662,6 +806,7 @@ export default function MahjongTable({
         wall: rotatedWall,
         turn: bestSeat,
         mustDraw: true,
+        turnStartedAt: Date.now(),
         diceInfo: {
           phase: 'rolling',
           rolls: updatedRolls,
@@ -677,7 +822,6 @@ export default function MahjongTable({
   );
   const isRollingPhase = gameState?.diceInfo?.phase === 'rolling';
 
-  // Transisi otomatis dari hasil dadu lengkap ke Meja Permainan (anti-reset polling)
   useEffect(() => {
     if (!isHost || !isRollingPhase || !allDiceRolled) return;
 
@@ -686,6 +830,7 @@ export default function MahjongTable({
       if (!latest || latest.diceInfo.phase !== 'rolling') return;
       await pushStateToSupabase({
         ...latest,
+        turnStartedAt: Date.now(),
         diceInfo: {
           ...latest.diceInfo,
           phase: 'playing',
@@ -696,7 +841,9 @@ export default function MahjongTable({
     return () => clearTimeout(timer);
   }, [isHost, isRollingPhase, allDiceRolled, pushStateToSupabase]);
 
-  // Sinkronisasi Realtime + Polling 1.5 detik
+  // Sinkronisasi Realtime + Polling (otomatis berhenti saat ronde selesai agar tidak berkedip)
+  const hasWinner = Boolean(gameState?.winnerInfo);
+
   useEffect(() => {
     let isMounted = true;
 
@@ -733,7 +880,11 @@ export default function MahjongTable({
     }
 
     syncFromServer();
-    const pollInterval = setInterval(syncFromServer, 1500);
+    const pollInterval = setInterval(() => {
+      if (!gameStateRef.current?.winnerInfo) {
+        syncFromServer();
+      }
+    }, 1500);
 
     const channel = supabase
       .channel(`game_state_${room.id}`)
@@ -765,17 +916,18 @@ export default function MahjongTable({
     };
   }, [room.id, isHost, initRound, parseDbRow]);
 
+  // Pencatatan Skor Pemenang (1x per ronde, bebas loop/kedip)
   useEffect(() => {
-    if (!gameState?.winnerInfo) {
+    if (!hasWinner || !gameState?.winnerInfo) {
       recordedWinRef.current = null;
       return;
     }
 
-    const winSig = `${gameState.winnerInfo.seat}_${gameState.winnerInfo.name}_${gameState.discards.length}`;
+    const { seat, name, faan } = gameState.winnerInfo;
+    const winSig = `${seat}_${name}_${faan}`;
     if (recordedWinRef.current === winSig) return;
     recordedWinRef.current = winSig;
 
-    const { seat, faan } = gameState.winnerInfo;
     if (seat === -1 || room.type === 'private') {
       setRpChangeShown(0);
       return;
@@ -793,9 +945,85 @@ export default function MahjongTable({
         wins: didIWin ? profile.wins + 1 : profile.wins,
       })
       .eq('id', profile.id)
-      .then(() => onProfileUpdated());
-  }, [gameState, mySeat, profile, room.type, onProfileUpdated]);
+      .then(() => {
+        onProfileUpdatedRef.current();
+      });
+  }, [hasWinner, gameState?.winnerInfo, mySeat, profile, room.type]);
 
+  // TIMER BATAS 1 MENIT (60 DETIK) TIAP GILIRAN PEMAIN
+  useEffect(() => {
+    if (
+      !gameState ||
+      gameState.diceInfo.phase !== 'playing' ||
+      gameState.winnerInfo
+    ) {
+      setSecondsLeft(TURN_LIMIT_SECONDS);
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      const latest = gameStateRef.current;
+      if (
+        !latest ||
+        latest.diceInfo.phase !== 'playing' ||
+        latest.winnerInfo
+      ) {
+        return;
+      }
+
+      const started = latest.turnStartedAt || Date.now();
+      const elapsed = Math.floor((Date.now() - started) / 1000);
+      const rem = Math.max(0, TURN_LIMIT_SECONDS - elapsed);
+      setSecondsLeft(rem);
+
+      // Jika waktu habis pada giliran kita sendiri -> otomatis jalan
+      if (rem === 0 && latest.turn === mySeat) {
+        const turnSig = `${latest.turn}_${started}`;
+        if (autoTimeoutTriggeredRef.current === turnSig) return;
+        autoTimeoutTriggeredRef.current = turnSig;
+
+        const seatKey = String(mySeat);
+        let nextWall = [...latest.wall];
+        let hand = [...(latest.hands[seatKey] || [])];
+
+        if (latest.mustDraw) {
+          if (nextWall.length === 0) {
+            await pushStateToSupabase({
+              ...latest,
+              winnerInfo: {
+                seat: -1,
+                name: 'Draw Game (Dinding Habis)',
+                faan: 0,
+              },
+            });
+            return;
+          }
+          const drawn = nextWall.pop()!;
+          hand.push(drawn);
+        }
+
+        const discarded = hand[hand.length - 1];
+        const remaining = sortHand(hand.slice(0, -1));
+        setSelectedTileId(null);
+        setDrawnTileId(null);
+        setClaimOptions(null);
+
+        await pushStateToSupabase({
+          ...latest,
+          wall: nextWall,
+          hands: { ...latest.hands, [seatKey]: remaining },
+          discards: [...latest.discards, discarded],
+          turn: (mySeat + 1) % 4,
+          mustDraw: true,
+          turnStartedAt: Date.now(),
+        });
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [gameState, mySeat, pushStateToSupabase]);
+
+  // Deteksi Peluang Klaim Chi / Pong / Kong
   useEffect(() => {
     if (
       !gameState ||
@@ -851,7 +1079,7 @@ export default function MahjongTable({
     }
   }, [gameState, mySeat]);
 
-  // ENGINE BOT ANTI-STUCK: Berjalan di atas interval pengawas yang tidak pernah mati
+  // ENGINE BOT ANTI-STUCK (2.2 detik per giliran)
   useEffect(() => {
     if (!isHost) return;
 
@@ -932,6 +1160,7 @@ export default function MahjongTable({
             discards: [...fresh.discards, discarded],
             turn: (activeTurn + 1) % 4,
             mustDraw: true,
+            turnStartedAt: Date.now(),
           });
         } finally {
           botBusyRef.current = false;
@@ -967,6 +1196,7 @@ export default function MahjongTable({
     const updatedHand = [...(gameState.hands[seatKey] || []), drawn];
 
     setDrawnTileId(drawn.id);
+    setSelectedTileId(drawn.id);
     setClaimOptions(null);
 
     await pushStateToSupabase({
@@ -990,17 +1220,19 @@ export default function MahjongTable({
 
     playTileClick();
     const seatKey = String(mySeat);
-    const remaining = sortHand(
-      (gameState.hands[seatKey] || []).filter((t) => t.id !== tile.id)
+    const remaining = (gameState.hands[seatKey] || []).filter(
+      (t) => t.id !== tile.id
     );
 
     setDrawnTileId(null);
+    setSelectedTileId(null);
     await pushStateToSupabase({
       ...gameState,
       hands: { ...gameState.hands, [seatKey]: remaining },
       discards: [...gameState.discards, tile],
       turn: (mySeat + 1) % 4,
       mustDraw: true,
+      turnStartedAt: Date.now(),
     });
   };
 
@@ -1029,7 +1261,7 @@ export default function MahjongTable({
     }
 
     const usedIds = new Set(usedFromHand.map((t) => t.id));
-    const remainingHand = sortHand(myHand.filter((t) => !usedIds.has(t.id)));
+    const remainingHand = myHand.filter((t) => !usedIds.has(t.id));
     const nextMelds = [
       ...(gameState.melds[seatKey] || []),
       { type, tiles: [...usedFromHand, tile], fromSeat },
@@ -1043,6 +1275,7 @@ export default function MahjongTable({
       discards: gameState.discards.slice(0, -1),
       turn: mySeat,
       mustDraw: type === 'KONG',
+      turnStartedAt: Date.now(),
     });
   };
 
@@ -1086,16 +1319,18 @@ export default function MahjongTable({
   );
   const isBotThinking = Boolean(currentTurnObj?.is_bot);
 
-  const myHand = gameState.hands[String(bottomSeat)] || [];
   const myMelds = gameState.melds[String(bottomSeat)] || [];
   const topHand = gameState.hands[String(topSeat)] || [];
+  const topMelds = gameState.melds[String(topSeat)] || [];
   const leftHand = gameState.hands[String(leftSeat)] || [];
+  const leftMelds = gameState.melds[String(leftSeat)] || [];
   const rightHand = gameState.hands[String(rightSeat)] || [];
+  const rightMelds = gameState.melds[String(rightSeat)] || [];
 
-  const playerCanHu = canWin(myHand, myMelds.length);
+  const playerCanHu = canWin(orderedMyHand, myMelds.length);
   const highlightedIds = new Set<string>();
   if (claimOptions) {
-    myHand.forEach((t) => {
+    orderedMyHand.forEach((t) => {
       if (
         t.suit === claimOptions.tile.suit &&
         Math.abs(t.value - claimOptions.tile.value) <= 2
@@ -1106,6 +1341,23 @@ export default function MahjongTable({
   }
 
   const myDiceRoll = gameState.diceInfo.rolls[String(mySeat)];
+  const canClickDiscardNow =
+    gameState.diceInfo.phase === 'playing' &&
+    gameState.turn === mySeat &&
+    !gameState.mustDraw &&
+    !claimOptions &&
+    !gameState.winnerInfo;
+
+  // Pembagian visual dinding 4 sisi di tengah meja (proporsional sisa dinding)
+  const wallRatio = Math.max(0, gameState.wall.length) / 84;
+  const topWallCount = Math.ceil(11 * wallRatio);
+  const bottomWallCount = Math.ceil(11 * wallRatio);
+  const leftWallCount = Math.ceil(9 * wallRatio);
+  const rightWallCount = Math.ceil(9 * wallRatio);
+
+  const selectedIndex = orderedMyHand.findIndex((t) => t.id === selectedTileId);
+  const selectedTileObj =
+    selectedIndex >= 0 ? orderedMyHand[selectedIndex] : null;
 
   return (
     <div className="min-h-[100dvh] bg-[radial-gradient(circle_at_center,#291d14_0%,#090705_100%)] text-stone-100 flex flex-col justify-between overflow-x-hidden select-none">
@@ -1124,12 +1376,23 @@ export default function MahjongTable({
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-xs">
+          {gameState.diceInfo.phase === 'playing' && !gameState.winnerInfo && (
+            <span
+              className={`px-2 py-1 rounded font-mono font-bold flex items-center gap-1 border ${
+                secondsLeft <= 10
+                  ? 'bg-red-950 border-red-500 text-red-300 animate-pulse'
+                  : 'bg-stone-900 border-stone-700 text-amber-200'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5" /> {secondsLeft}s
+            </span>
+          )}
           <span className="text-stone-300">
             Dinding:{' '}
             <strong className="text-amber-300">{gameState.wall.length}</strong>
           </span>
           <span
-            className={`px-2 py-1 rounded border font-semibold truncate max-w-[175px] sm:max-w-none ${
+            className={`px-2 py-1 rounded border font-semibold truncate max-w-[165px] sm:max-w-none ${
               gameState.diceInfo.phase === 'rolling'
                 ? 'bg-purple-950 border-purple-500/40 text-purple-200'
                 : gameState.turn === mySeat
@@ -1148,24 +1411,27 @@ export default function MahjongTable({
         </div>
       </div>
 
-      {/* AREA MEJA 3D */}
+      {/* AREA MEJA MAHJONG */}
       <div className="relative flex-1 flex items-center justify-center p-1.5 sm:p-3 [perspective:1100px]">
         <div
-          className={`relative w-full max-w-4xl min-h-[440px] sm:h-[530px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2.5 sm:p-5 ${
+          className={`relative w-full max-w-5xl min-h-[490px] sm:h-[580px] rounded-2xl sm:rounded-3xl border-[6px] sm:border-[12px] border-[#3d2314] bg-[radial-gradient(circle_at_center,#1b5e3a_0%,#0f3d24_75%,#092616_100%)] shadow-[0_20px_60px_rgba(0,0,0,0.85),inset_0_0_40px_rgba(0,0,0,0.65)] transition-transform duration-500 flex flex-col justify-between p-2 sm:p-4 ${
             tableTilt ? 'sm:[transform:rotateX(20deg)]' : ''
           }`}
         >
-          {/* LAWAN ATAS */}
+          {/* LAWAN ATAS + MELD TERBUKA ATAS */}
           <div className="flex flex-col items-center gap-1">
-            <div
-              className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs border ${
-                gameState.turn === topSeat &&
-                gameState.diceInfo.phase === 'playing'
-                  ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
-                  : 'bg-black/50 text-stone-300 border-stone-700'
-              }`}
-            >
-              {WIND_KANJI[topSeat]} {getSeatName(topSeat)} ({topHand.length})
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <div
+                className={`px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs border ${
+                  gameState.turn === topSeat &&
+                  gameState.diceInfo.phase === 'playing'
+                    ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
+                    : 'bg-black/50 text-stone-300 border-stone-700'
+                }`}
+              >
+                {WIND_KANJI[topSeat]} {getSeatName(topSeat)} ({topHand.length})
+              </div>
+              <MeldStrip melds={topMelds} />
             </div>
             <div className="flex gap-0.5">
               {topHand.map((_, i) => (
@@ -1177,219 +1443,392 @@ export default function MahjongTable({
             </div>
           </div>
 
-          {/* TENGAH MEJA */}
-          <div className="flex items-center justify-between flex-1 my-1.5 sm:my-2 gap-1.5 sm:gap-3">
-            {/* Lawan Kiri */}
-            <div className="flex flex-col items-center gap-1.5 shrink-0">
-              <div
-                className={`px-1.5 sm:px-2.5 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[70px] sm:max-w-none truncate ${
-                  gameState.turn === leftSeat &&
-                  gameState.diceInfo.phase === 'playing'
-                    ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
-                    : 'bg-black/50 text-stone-300 border-stone-700'
-                }`}
-              >
-                {WIND_KANJI[leftSeat]} {getSeatName(leftSeat)}
+          {/* TENGAH MEJA: LAWAN KIRI + DINDING 4 SISI + KOLAM BUANGAN + LAWAN KANAN */}
+          <div className="flex items-center justify-between flex-1 my-1 sm:my-2 gap-1 sm:gap-3">
+            {/* Lawan Kiri + Meld Terbuka Kiri */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex flex-col items-center gap-1">
+                <div
+                  className={`px-1.5 sm:px-2 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[68px] sm:max-w-[95px] truncate ${
+                    gameState.turn === leftSeat &&
+                    gameState.diceInfo.phase === 'playing'
+                      ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
+                      : 'bg-black/50 text-stone-300 border-stone-700'
+                  }`}
+                >
+                  {WIND_KANJI[leftSeat]} {getSeatName(leftSeat)}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {leftHand.slice(0, 9).map((_, i) => (
+                    <div
+                      key={i}
+                      className="w-4 h-2.5 sm:w-6 sm:h-3 rounded-sm bg-emerald-800 border border-emerald-400/40"
+                    />
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-0.5">
-                {leftHand.slice(0, 9).map((_, i) => (
+              <MeldStrip melds={leftMelds} vertical />
+            </div>
+
+            {/* FORMASI DINDING TILES 4 SISI DI TENGAH + KOLAM BUANGAN + TOMBOL AKSI TENGAH */}
+            <div className="relative flex-1 max-w-md flex flex-col items-center justify-center">
+              {/* Dinding Utara (Atas Kolam) */}
+              <div className="flex gap-0.5 mb-1">
+                {Array.from({ length: topWallCount }).map((_, i) => (
                   <div
                     key={i}
-                    className="w-5 h-2.5 sm:w-7 sm:h-3.5 rounded-sm bg-emerald-800 border border-emerald-400/40"
+                    className="w-3.5 h-2.5 sm:w-5 sm:h-3 rounded-[2px] bg-emerald-700 border-b-2 border-amber-200/80 shadow"
                   />
                 ))}
               </div>
-            </div>
 
-            {/* Kolam Tengah / Overlay Lempar Dadu */}
-            <div className="flex-1 max-w-xs sm:max-w-sm min-h-[155px] sm:min-h-[195px] max-h-[240px] overflow-y-auto bg-black/30 border border-emerald-400/20 rounded-xl p-2 sm:p-3 flex flex-wrap content-start gap-1 shadow-inner relative">
-              {gameState.diceInfo.phase === 'rolling' ? (
-                <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-2.5 py-1">
-                  <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs sm:text-sm">
-                    <Dices className="w-4 h-4" />
-                    <span>Lempar Dadu Penentu Giliran & Potong Dinding</span>
-                  </div>
+              <div className="flex items-center justify-center w-full gap-1">
+                {/* Dinding Barat (Kiri Kolam) */}
+                <div className="flex flex-col gap-0.5">
+                  {Array.from({ length: leftWallCount }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="w-2.5 h-3.5 sm:w-3 sm:h-4 rounded-[2px] bg-emerald-700 border-r-2 border-amber-200/80 shadow"
+                    />
+                  ))}
+                </div>
 
-                  <div className="grid grid-cols-2 gap-1.5 w-full text-[11px]">
-                    {[0, 1, 2, 3].map((s) => {
-                      const r = gameState.diceInfo.rolls[String(s)];
-                      const total = r ? r.reduce((a, b) => a + b, 0) : 0;
-                      const isWinner =
-                        allDiceRolled && gameState.diceInfo.startingSeat === s;
-                      return (
-                        <div
-                          key={s}
-                          className={`p-1.5 rounded border ${
-                            isWinner
-                              ? 'bg-amber-500/20 border-amber-400 text-amber-200 font-bold'
-                              : 'bg-stone-900/80 border-stone-700 text-stone-300'
-                          }`}
+                {/* Kolam Tengah */}
+                <div className="flex-1 min-h-[165px] sm:min-h-[205px] max-h-[245px] overflow-y-auto bg-black/35 border border-emerald-400/30 rounded-xl p-2 sm:p-2.5 flex flex-wrap content-start gap-1 shadow-inner relative">
+                  {gameState.diceInfo.phase === 'rolling' ? (
+                    <div className="w-full h-full flex flex-col items-center justify-center text-center space-y-2 py-1">
+                      <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs sm:text-sm">
+                        <Dices className="w-4 h-4" />
+                        <span>Lempar Dadu Penentu Giliran</span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 w-full text-[11px]">
+                        {[0, 1, 2, 3].map((s) => {
+                          const r = gameState.diceInfo.rolls[String(s)];
+                          const total = r ? r.reduce((a, b) => a + b, 0) : 0;
+                          const isWinner =
+                            allDiceRolled &&
+                            gameState.diceInfo.startingSeat === s;
+                          return (
+                            <div
+                              key={s}
+                              className={`p-1.5 rounded border ${
+                                isWinner
+                                  ? 'bg-amber-500/20 border-amber-400 text-amber-200 font-bold'
+                                  : 'bg-stone-900/80 border-stone-700 text-stone-300'
+                              }`}
+                            >
+                              <div className="truncate text-[10px]">
+                                {WIND_KANJI[s]} {getSeatName(s)}
+                              </div>
+                              {r ? (
+                                <div className="font-mono text-xs mt-0.5 text-emerald-300">
+                                  🎲 {r.join('-')} = <strong>{total}</strong>
+                                </div>
+                              ) : (
+                                <div className="text-[10px] text-stone-500 italic mt-0.5">
+                                  Belum lempar...
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {!myDiceRoll ? (
+                        <button
+                          onClick={handlePlayerRollDice}
+                          className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs shadow-lg animate-bounce"
                         >
-                          <div className="truncate text-[10px]">
-                            {WIND_KANJI[s]} {getSeatName(s)}
+                          🎲 Lempar 3 Dadu Sekarang
+                        </button>
+                      ) : allDiceRolled ? (
+                        <div className="space-y-1">
+                          <div className="text-[11px] text-emerald-300 font-semibold">
+                            Dinding dipotong urutan ke-
+                            {gameState.diceInfo.wallBreakStack} •{' '}
+                            {getSeatName(gameState.diceInfo.startingSeat)} jalan
+                            duluan!
                           </div>
-                          {r ? (
-                            <div className="font-mono text-xs mt-0.5 text-emerald-300">
-                              🎲 {r.join('-')} = <strong>{total}</strong>
-                            </div>
-                          ) : (
-                            <div className="text-[10px] text-stone-500 italic mt-0.5">
-                              Belum lempar...
-                            </div>
+                          {isHost && (
+                            <button
+                              onClick={() =>
+                                pushStateToSupabase({
+                                  ...gameState,
+                                  turnStartedAt: Date.now(),
+                                  diceInfo: {
+                                    ...gameState.diceInfo,
+                                    phase: 'playing',
+                                  },
+                                })
+                              }
+                              className="px-3.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow"
+                            >
+                              Masuk ke Meja Permainan →
+                            </button>
                           )}
                         </div>
-                      );
-                    })}
-                  </div>
-
-                  {!myDiceRoll ? (
-                    <button
-                      onClick={handlePlayerRollDice}
-                      className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-extrabold text-xs shadow-lg animate-bounce"
-                    >
-                      🎲 Lempar 3 Dadu Sekarang
-                    </button>
-                  ) : allDiceRolled ? (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] text-emerald-300 font-semibold">
-                        Dinding dipotong urutan ke-
-                        {gameState.diceInfo.wallBreakStack} •{' '}
-                        {getSeatName(gameState.diceInfo.startingSeat)} jalan
-                        duluan!
-                      </div>
-                      {isHost && (
-                        <button
-                          onClick={() =>
-                            pushStateToSupabase({
-                              ...gameState,
-                              diceInfo: {
-                                ...gameState.diceInfo,
-                                phase: 'playing',
-                              },
-                            })
-                          }
-                          className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow"
-                        >
-                          Masuk ke Meja Permainan →
-                        </button>
+                      ) : (
+                        <div className="text-[11px] text-stone-400">
+                          Menunggu pemain lain melempar dadu...
+                        </div>
                       )}
                     </div>
                   ) : (
-                    <div className="text-[11px] text-stone-400">
-                      Menunggu pemain lain melempar dadu...
-                    </div>
+                    <>
+                      {gameState.discards.length === 0 && (
+                        <div className="w-full h-32 flex items-center justify-center text-[11px] text-emerald-200/35 italic text-center">
+                          Kolam Tengah Meja (Potong Dinding #
+                          {gameState.diceInfo.wallBreakStack})
+                        </div>
+                      )}
+                      {gameState.discards.map((tile, idx) => (
+                        <button
+                          key={`${tile.id}_${idx}`}
+                          onClick={() => setInspectedTile(tile)}
+                          onMouseEnter={() => setInspectedTile(tile)}
+                          className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#faf6eb] to-[#e9dec4] border border-stone-400 border-b-2 border-b-stone-500 shadow flex items-center justify-center hover:scale-110 transition overflow-hidden ${
+                            idx === gameState.discards.length - 1
+                              ? 'ring-2 ring-amber-400'
+                              : ''
+                          }`}
+                        >
+                          <TileFace tile={tile} />
+                        </button>
+                      ))}
+                    </>
                   )}
                 </div>
-              ) : (
-                <>
-                  {gameState.discards.length === 0 && (
-                    <div className="w-full h-32 flex items-center justify-center text-[11px] text-emerald-200/30 italic text-center">
-                      Kolam Buangan Tengah Meja (Dinding dipotong #
-                      {gameState.diceInfo.wallBreakStack})
-                    </div>
-                  )}
-                  {gameState.discards.map((tile, idx) => (
+
+                {/* Dinding Timur (Kanan Kolam) */}
+                <div className="flex flex-col gap-0.5">
+                  {Array.from({ length: rightWallCount }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="w-2.5 h-3.5 sm:w-3 sm:h-4 rounded-[2px] bg-emerald-700 border-l-2 border-amber-200/80 shadow"
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Dinding Selatan (Bawah Kolam) */}
+              <div className="flex gap-0.5 mt-1">
+                {Array.from({ length: bottomWallCount }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="w-3.5 h-2.5 sm:w-5 sm:h-3 rounded-[2px] bg-emerald-700 border-t-2 border-amber-200/80 shadow"
+                  />
+                ))}
+              </div>
+
+              {/* TOMBOL AKSI UTAMA DI TENGAH MEJA (ANTI BLIND SPOT) */}
+              {gameState.diceInfo.phase === 'playing' &&
+                !gameState.winnerInfo && (
+                  <div className="mt-2 flex flex-wrap items-center justify-center gap-2 z-20">
+                    {gameState.turn === mySeat &&
+                      gameState.mustDraw &&
+                      !claimOptions && (
+                        <button
+                          onClick={handleManualDraw}
+                          className="px-5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-stone-950 font-extrabold text-xs sm:text-sm shadow-xl shadow-amber-500/30 flex items-center gap-1.5 animate-pulse"
+                        >
+                          <Sparkles className="w-4 h-4" /> DRAW TILE (
+                          {secondsLeft}s)
+                        </button>
+                      )}
+
+                    {playerCanHu && (
+                      <button
+                        onClick={declareWin}
+                        className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-xs sm:text-sm shadow-xl animate-bounce"
+                      >
+                        🀄 WU / HU (MENANG)!
+                      </button>
+                    )}
+
+                    {claimOptions && (
+                      <div className="flex flex-wrap items-center justify-center gap-1.5 bg-stone-950/95 border-2 border-amber-400 px-3 py-1.5 rounded-xl shadow-2xl">
+                        <span className="text-xs text-amber-200 mr-1">
+                          Klaim <strong>{claimOptions.tile.sub}</strong>:
+                        </span>
+                        {claimOptions.canKong && (
+                          <button
+                            onClick={() => executeClaim('KONG')}
+                            className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-extrabold"
+                          >
+                            KONG
+                          </button>
+                        )}
+                        {claimOptions.canPong && (
+                          <button
+                            onClick={() => executeClaim('PONG')}
+                            className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-extrabold"
+                          >
+                            PONG
+                          </button>
+                        )}
+                        {claimOptions.chiCombos.map((combo, i) => (
+                          <button
+                            key={i}
+                            onClick={() => executeClaim('CHI', combo)}
+                            className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-extrabold"
+                          >
+                            CHI ({combo[0].value}-{combo[1].value})
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => setClaimOptions(null)}
+                          className="px-2.5 py-1 rounded-lg bg-stone-700 hover:bg-stone-600 text-xs font-semibold"
+                        >
+                          Lewati
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+            </div>
+
+            {/* Lawan Kanan + Meld Terbuka Kanan */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <MeldStrip melds={rightMelds} vertical />
+              <div className="flex flex-col items-center gap-1">
+                <div
+                  className={`px-1.5 sm:px-2 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[68px] sm:max-w-[95px] truncate ${
+                    gameState.turn === rightSeat &&
+                    gameState.diceInfo.phase === 'playing'
+                      ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
+                      : 'bg-black/50 text-stone-300 border-stone-700'
+                  }`}
+                >
+                  {WIND_KANJI[rightSeat]} {getSeatName(rightSeat)}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {rightHand.slice(0, 9).map((_, i) => (
+                    <div
+                      key={i}
+                      className="w-4 h-2.5 sm:w-6 sm:h-3 rounded-sm bg-emerald-800 border border-emerald-400/40"
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* AREA PEMAIN BAWAH + SUSUN BATU PRIBADI + MELD TERBUKA PRIBADI */}
+          <div className="flex flex-col gap-1.5 pt-2 border-t border-emerald-400/20">
+            {/* Toolbar Susun Batu Pribadi */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleAutoSortMyHand}
+                  className="px-2.5 py-1 rounded-md bg-stone-900/90 hover:bg-stone-800 border border-amber-400/30 text-[11px] text-amber-200 flex items-center gap-1"
+                >
+                  <ArrowUpDown className="w-3 h-3" /> Rapikan Urutan
+                </button>
+
+                {selectedTileObj && (
+                  <div className="flex items-center gap-1 bg-stone-900/95 border border-stone-700 rounded-md px-1.5 py-0.5">
                     <button
-                      key={`${tile.id}_${idx}`}
-                      onClick={() => setInspectedTile(tile)}
+                      onClick={() =>
+                        moveTilePosition(selectedIndex, selectedIndex - 1)
+                      }
+                      disabled={selectedIndex <= 0}
+                      className="p-0.5 hover:bg-stone-700 rounded disabled:opacity-30"
+                      title="Geser Kiri"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="text-[10px] text-amber-300 font-semibold px-1">
+                      {selectedTileObj.sub}
+                    </span>
+                    <button
+                      onClick={() =>
+                        moveTilePosition(selectedIndex, selectedIndex + 1)
+                      }
+                      disabled={selectedIndex >= orderedMyHand.length - 1}
+                      className="p-0.5 hover:bg-stone-700 rounded disabled:opacity-30"
+                      title="Geser Kanan"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                    {canClickDiscardNow && (
+                      <button
+                        onClick={() => handleDiscard(selectedTileObj)}
+                        className="ml-1 px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold flex items-center gap-0.5"
+                      >
+                        <Trash2 className="w-3 h-3" /> Buang
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <span className="text-[10px] text-emerald-200/75">
+                {canClickDiscardNow
+                  ? 'Tap 2x kartu (atau tombol Buang) untuk membuang • Drag/geser untuk menyusun'
+                  : 'Drag atau klik kartu untuk menyusun urutan tangan Anda'}
+              </span>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+              <div className="flex items-end justify-center sm:justify-start gap-1 flex-wrap">
+                {orderedMyHand.map((tile, idx) => {
+                  const isDrawn = tile.id === drawnTileId;
+                  const isSelected = tile.id === selectedTileId;
+                  const isHighlighted = highlightedIds.has(tile.id);
+
+                  return (
+                    <button
+                      key={tile.id}
+                      draggable
+                      onDragStart={() => setDraggedTileId(tile.id)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => {
+                        if (!draggedTileId) return;
+                        const fromIdx = orderedMyHand.findIndex(
+                          (t) => t.id === draggedTileId
+                        );
+                        moveTilePosition(fromIdx, idx);
+                        setDraggedTileId(null);
+                      }}
+                      onClick={() => {
+                        setInspectedTile(tile);
+                        if (isSelected && canClickDiscardNow) {
+                          handleDiscard(tile);
+                        } else {
+                          setSelectedTileId(tile.id);
+                          playTileClick();
+                        }
+                      }}
                       onMouseEnter={() => setInspectedTile(tile)}
-                      className={`w-6 h-8 sm:w-7 sm:h-9 rounded bg-gradient-to-b from-[#faf6eb] to-[#e9dec4] border border-stone-400 border-b-2 border-b-stone-500 shadow flex items-center justify-center hover:scale-110 transition overflow-hidden ${
-                        idx === gameState.discards.length - 1
-                          ? 'ring-2 ring-amber-400'
-                          : ''
+                      className={`w-8 h-12 sm:w-10 sm:h-14 rounded-md bg-gradient-to-b from-[#fcf9f0] via-[#f5eedc] to-[#e3d6b8] border border-stone-300 border-b-[3px] sm:border-b-4 border-b-emerald-800 shadow-lg flex items-center justify-center transition-transform overflow-hidden cursor-grab active:cursor-grabbing ${
+                        isDrawn ? 'ml-1.5 sm:ml-3 ring-2 ring-amber-400' : ''
+                      } ${
+                        isSelected
+                          ? '-translate-y-3 ring-2 ring-sky-400'
+                          : isHighlighted
+                          ? 'ring-2 ring-amber-400 -translate-y-2'
+                          : 'hover:-translate-y-1.5'
                       }`}
                     >
                       <TileFace tile={tile} />
                     </button>
-                  ))}
-                </>
-              )}
-            </div>
-
-            {/* Lawan Kanan */}
-            <div className="flex flex-col items-center gap-1.5 shrink-0">
-              <div
-                className={`px-1.5 sm:px-2.5 py-0.5 rounded-full text-[9px] sm:text-[11px] border max-w-[70px] sm:max-w-none truncate ${
-                  gameState.turn === rightSeat &&
-                  gameState.diceInfo.phase === 'playing'
-                    ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
-                    : 'bg-black/50 text-stone-300 border-stone-700'
-                }`}
-              >
-                {WIND_KANJI[rightSeat]} {getSeatName(rightSeat)}
+                  );
+                })}
               </div>
-              <div className="flex flex-col gap-0.5">
-                {rightHand.slice(0, 9).map((_, i) => (
-                  <div
-                    key={i}
-                    className="w-5 h-2.5 sm:w-7 sm:h-3.5 rounded-sm bg-emerald-800 border border-emerald-400/40"
-                  />
-                ))}
-              </div>
+
+              <MeldStrip melds={myMelds} />
             </div>
-          </div>
-
-          {/* AREA PEMAIN BAWAH */}
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2 pt-2 border-t border-emerald-400/20">
-            <div className="flex items-end justify-center sm:justify-start gap-1 flex-wrap">
-              {myHand.map((tile) => {
-                const isDrawn = tile.id === drawnTileId;
-                const isHighlighted = highlightedIds.has(tile.id);
-                const canClickDiscard =
-                  gameState.diceInfo.phase === 'playing' &&
-                  gameState.turn === mySeat &&
-                  !gameState.mustDraw &&
-                  !claimOptions &&
-                  !gameState.winnerInfo;
-
-                return (
-                  <button
-                    key={tile.id}
-                    onClick={() => handleDiscard(tile)}
-                    onMouseEnter={() => setInspectedTile(tile)}
-                    disabled={!canClickDiscard}
-                    className={`w-8 h-12 sm:w-10 sm:h-14 rounded-md bg-gradient-to-b from-[#fcf9f0] via-[#f5eedc] to-[#e3d6b8] border border-stone-300 border-b-[3px] sm:border-b-4 border-b-emerald-800 shadow-lg flex items-center justify-center transition-transform overflow-hidden ${
-                      isDrawn ? 'ml-1.5 sm:ml-3 ring-2 ring-amber-400' : ''
-                    } ${
-                      isHighlighted ? 'ring-2 ring-amber-400 -translate-y-2' : ''
-                    } ${
-                      canClickDiscard
-                        ? 'hover:-translate-y-2.5 active:-translate-y-2.5 cursor-pointer'
-                        : 'opacity-95 cursor-default'
-                    }`}
-                  >
-                    <TileFace tile={tile} />
-                  </button>
-                );
-              })}
-            </div>
-
-            {myMelds.length > 0 && (
-              <div className="flex justify-center sm:justify-end gap-1.5 bg-black/30 p-1.5 rounded-lg border border-amber-400/20 overflow-x-auto">
-                {myMelds.map((m, idx) => (
-                  <div key={idx} className="flex gap-0.5 shrink-0">
-                    {m.tiles.map((t, ti) => (
-                      <div
-                        key={ti}
-                        className="w-6 h-9 sm:w-7 sm:h-10 rounded bg-[#f5eedc] border border-stone-400 flex items-center justify-center overflow-hidden"
-                      >
-                        <TileFace tile={t} />
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </div>
       </div>
 
-      {/* PANEL AKSI BAWAH */}
-      <div className="bg-stone-950/95 border-t border-amber-500/20 px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 z-20">
+      {/* PANEL INFO BAWAH */}
+      <div className="bg-stone-950/95 border-t border-amber-500/20 px-3 sm:px-4 py-2 flex items-center justify-between gap-2 z-20">
         <div className="flex items-center gap-2">
           <button
             onClick={() => setTableTilt(!tableTilt)}
-            className="hidden sm:flex px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 text-xs items-center gap-1.5 text-stone-200"
+            className="hidden sm:flex px-3 py-1 rounded-lg bg-stone-800 hover:bg-stone-700 text-xs items-center gap-1.5 text-stone-200"
           >
             <Eye className="w-3.5 h-3.5 text-amber-400" />
             Sudut: {tableTilt ? '3D Miring' : 'Datar'}
@@ -1404,82 +1843,13 @@ export default function MahjongTable({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-center sm:justify-end gap-2 w-full sm:w-auto">
-          {gameState.diceInfo.phase === 'playing' &&
-            gameState.turn === mySeat &&
-            gameState.mustDraw &&
-            !claimOptions &&
-            !gameState.winnerInfo && (
-              <button
-                onClick={handleManualDraw}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-stone-950 font-extrabold text-xs sm:text-sm shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 animate-pulse"
-              >
-                <Sparkles className="w-4 h-4" /> DRAW TILE DARI DINDING
-              </button>
-            )}
-
-          {gameState.diceInfo.phase === 'playing' &&
-            gameState.turn === mySeat &&
-            !gameState.mustDraw &&
-            !gameState.winnerInfo && (
-              <span className="text-xs text-amber-300 font-medium text-center">
-                Tap batu di tangan Anda untuk membuang ke meja.
-              </span>
-            )}
-
-          {gameState.diceInfo.phase === 'playing' &&
-            playerCanHu &&
-            !gameState.winnerInfo && (
-              <button
-                onClick={declareWin}
-                className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-sm shadow-lg animate-bounce"
-              >
-                🀄 HU (MENANG)!
-              </button>
-            )}
-
-          {claimOptions && (
-            <div className="flex flex-wrap items-center justify-center gap-1.5 bg-stone-900 border border-amber-400/50 px-2.5 py-1.5 rounded-xl w-full sm:w-auto">
-              <span className="text-xs text-amber-200 mr-1">
-                Klaim <strong>{claimOptions.tile.sub}</strong>:
-              </span>
-              {claimOptions.canKong && (
-                <button
-                  onClick={() => executeClaim('KONG')}
-                  className="px-2.5 py-1 rounded bg-purple-600 hover:bg-purple-500 text-xs font-bold"
-                >
-                  KONG
-                </button>
-              )}
-              {claimOptions.canPong && (
-                <button
-                  onClick={() => executeClaim('PONG')}
-                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-stone-950 text-xs font-bold"
-                >
-                  PONG
-                </button>
-              )}
-              {claimOptions.chiCombos.map((combo, i) => (
-                <button
-                  key={i}
-                  onClick={() => executeClaim('CHI', combo)}
-                  className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs font-bold"
-                >
-                  CHI ({combo[0].value}-{combo[1].value})
-                </button>
-              ))}
-              <button
-                onClick={() => setClaimOptions(null)}
-                className="px-2.5 py-1 rounded bg-stone-700 hover:bg-stone-600 text-xs"
-              >
-                Lewati
-              </button>
-            </div>
-          )}
+        <div className="text-[11px] text-stone-400">
+          Batas jalan: <strong className="text-amber-300">60 detik</strong> /
+          giliran
         </div>
       </div>
 
-      {/* MODAL HASIL PERTANDINGAN */}
+      {/* MODAL HASIL PERTANDINGAN (STABIL TANPA KEDIP) */}
       {gameState.winnerInfo && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-stone-900 border-2 border-amber-400 rounded-2xl p-6 max-w-sm w-full text-center space-y-4 shadow-2xl">
