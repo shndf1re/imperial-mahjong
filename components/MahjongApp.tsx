@@ -53,11 +53,29 @@ export default function MahjongApp() {
     } = await supabase.auth.getSession();
 
     if (session?.user) {
-      const { data } = await supabase
+      let { data } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', session.user.id)
         .single();
+
+      // Fallback: jika trigger SQL belum selesai membuat profil, buatkan langsung
+      if (!data) {
+        const fallbackName =
+          session.user.user_metadata?.username ||
+          `Player_${session.user.id.slice(0, 5)}`;
+        const { data: inserted } = await supabase
+          .from('profiles')
+          .upsert({
+            id: session.user.id,
+            username: fallbackName,
+            is_guest: session.user.is_anonymous ?? true,
+          })
+          .select()
+          .single();
+        data = inserted;
+      }
+
       if (data) setProfile(data as UserProfile);
       fetchLeaderboard();
     } else {
