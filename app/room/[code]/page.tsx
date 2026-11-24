@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-// Sesuaikan import komponen Lobby / WaitingRoom / MahjongTable Anda:
 import MahjongTable from '@/components/MahjongTable';
 
-export default function RoomPage() {
+const ACTIVE_ROOM_STORAGE_KEY = 'imperial_mahjong_active_room';
+
+function RoomContent() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
   const roomCode = decodeURIComponent(params?.code || '').toUpperCase();
@@ -14,8 +15,20 @@ export default function RoomPage() {
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [profile, setProfile] = useState<any>(null);
-  const [room, setRoom] = useState<any>(null);
+  const [room, setRoom] = useState<{
+    id: string;
+    code: string;
+    type: 'ranked' | 'private';
+    host_id: string;
+  } | null>(null);
   const [players, setPlayers] = useState<any[]>([]);
+
+  const clearSavedRoom = () => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+      localStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -25,38 +38,38 @@ export default function RoomPage() {
       setLoading(true);
       setErrorMsg(null);
 
-      // 1. Ambil user login aktif
-      const { data: authData } = await supabase.auth.getUser();
-      const userId = authData?.user?.id;
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
 
       if (!userId) {
         if (active) {
-          setErrorMsg('Sesi login tidak ditemukan. Silakan login ulang.');
+          setErrorMsg('Sesi login tidak ditemukan. Silakan masuk ke lobby terlebih dahulu.');
           setLoading(false);
         }
         return;
       }
 
-      // 2. Ambil profil pemain & data room berdasarkan kode
       const [{ data: prof }, { data: roomRow, error: roomErr }] =
         await Promise.all([
-          supabase.from('profiles').select('*').eq('id', userId).single(),
+          supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
           supabase
             .from('rooms')
             .select('*')
-            .eq('code', roomCode)
+            .eq('room_code', roomCode)
             .maybeSingle(),
         ]);
 
       if (!active) return;
 
       if (roomErr || !roomRow) {
+        clearSavedRoom();
         setErrorMsg(`Room "${roomCode}" tidak ditemukan atau sudah dibubarkan.`);
         setLoading(false);
         return;
       }
 
-      // 3. Ambil daftar pemain di room tersebut
       const { data: pRows } = await supabase
         .from('room_players')
         .select('*, profiles(username, rank_tier, rank_points)')
@@ -65,11 +78,18 @@ export default function RoomPage() {
 
       if (!active) return;
 
-      // Simpan kode room aktif agar tetap ingat saat navigasi
-      sessionStorage.setItem('imperial_mahjong_active_room', roomRow.code);
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, roomRow.room_code);
+        localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, roomRow.room_code);
+      }
 
       setProfile(prof);
-      setRoom(roomRow);
+      setRoom({
+        id: roomRow.id,
+        code: roomRow.room_code,
+        type: roomRow.room_type,
+        host_id: roomRow.host_id,
+      });
       setPlayers(pRows || []);
       setLoading(false);
     }
@@ -95,8 +115,9 @@ export default function RoomPage() {
           {errorMsg || 'Room tidak tersedia.'}
         </p>
         <button
+          type="button"
           onClick={() => {
-            sessionStorage.removeItem('imperial_mahjong_active_room');
+            clearSavedRoom();
             router.push('/');
           }}
           className="px-4 py-2 rounded-lg bg-amber-500 text-stone-950 font-bold text-xs"
@@ -112,16 +133,33 @@ export default function RoomPage() {
       profile={profile}
       room={room}
       players={players}
-      onExitRoom={() => {
-        sessionStorage.removeItem('imperial_mahjong_active_room');
+      onExitRoom={async () => {
+        await supabase
+          .from('room_players')
+          .delete()
+          .eq('room_id', room.id)
+          .eq('user_id', profile.id);
+        clearSavedRoom();
         router.push('/');
       }}
-      onReturnWaitingRoom={() => {
-        router.push(`/room/${room.code}/waiting`);
+      onReturnWaitingRoom={async () => {
+        await supabase.from('game_states').delete().eq('room_id', room.id);
+        await supabase
+          .from('room_players')
+          .delete()
+          .eq('room_id', room.id)
+          .eq('is_bot', true);
+        await supabase
+          .from('rooms')
+          .update({ status: 'waiting' })
+          .eq('id', room.id);
+        router.push('/');
       }}
       onDisbandRoom={async () => {
+        await supabase.from('game_states').delete().eq('room_id', room.id);
+        await supabase.from('room_players').delete().eq('room_id', room.id);
         await supabase.from('rooms').delete().eq('id', room.id);
-        sessionStorage.removeItem('imperial_mahjong_active_room');
+        clearSavedRoom();
         router.push('/');
       }}
       onProfileUpdated={async () => {
@@ -129,9 +167,23 @@ export default function RoomPage() {
           .from('profiles')
           .select('*')
           .eq('id', profile.id)
-          .single();
+          .maybeSingle();
         if (updated) setProfile(updated);
       }}
     />
+  );
+}
+
+export default function RoomPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-stone-950 text-amber-200 flex items-center justify-center text-sm">
+          Memuat Room...
+        </div>
+      }
+    >
+      <RoomContent />
+    </Suspense>
   );
 }
