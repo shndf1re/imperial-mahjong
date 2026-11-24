@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase, UserProfile } from '@/lib/supabase';
 import MahjongTable from './MahjongTable';
 import {
@@ -17,7 +18,11 @@ import {
   ArrowLeftRight,
 } from 'lucide-react';
 
+const ACTIVE_ROOM_STORAGE_KEY = 'imperial_mahjong_active_room';
+
 export default function MahjongApp() {
+  const router = useRouter();
+
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [authMode, setAuthMode] = useState<'guest' | 'login' | 'register'>('guest');
@@ -49,6 +54,20 @@ export default function MahjongApp() {
   useEffect(() => {
     profileRef.current = profile;
   }, [profile]);
+
+  const clearSavedRoom = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+      localStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+    }
+  }, []);
+
+  const saveRoomCode = useCallback((code: string) => {
+    if (typeof window !== 'undefined' && code) {
+      sessionStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, code);
+      localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, code);
+    }
+  }, []);
 
   const fetchLeaderboard = useCallback(async () => {
     const { data } = await supabase
@@ -117,12 +136,10 @@ export default function MahjongApp() {
         .order('seat_index', { ascending: true });
 
       if (!remainingHumans || remainingHumans.length === 0) {
-        // Tidak ada orang asli tersisa -> hapus room permanen beserta bot & game_states
         await supabase.from('game_states').delete().eq('room_id', roomId);
         await supabase.from('room_players').delete().eq('room_id', roomId);
         await supabase.from('rooms').delete().eq('id', roomId);
       } else {
-        // Jika yang keluar adalah Host, wariskan host_id ke pemain asli berikutnya
         const { data: roomInfo } = await supabase
           .from('rooms')
           .select('host_id')
@@ -157,6 +174,63 @@ export default function MahjongApp() {
       window.removeEventListener('pagehide', handleTabClose);
     };
   }, [leaveAndCleanupRoom]);
+
+  const fetchPlayers = useCallback(async (roomId: string) => {
+    const { data } = await supabase
+      .from('room_players')
+      .select('*, profiles(username, rank_tier, rank_points)')
+      .eq('room_id', roomId)
+      .order('seat_index', { ascending: true });
+    if (data) {
+      setRoomPlayers(data);
+      return data;
+    }
+    return [];
+  }, []);
+
+  // Pulihkan room tersimpan saat halaman di-refresh
+  const restoreSavedRoomIfAny = useCallback(
+    async (userId: string) => {
+      if (typeof window === 'undefined') return;
+      const savedCode =
+        sessionStorage.getItem(ACTIVE_ROOM_STORAGE_KEY) ||
+        localStorage.getItem(ACTIVE_ROOM_STORAGE_KEY);
+      if (!savedCode) return;
+
+      const { data: roomRow } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('room_code', savedCode.toUpperCase())
+        .maybeSingle();
+
+      if (!roomRow) {
+        clearSavedRoom();
+        return;
+      }
+
+      const { data: pRows } = await supabase
+        .from('room_players')
+        .select('*, profiles(username, rank_tier, rank_points)')
+        .eq('room_id', roomRow.id)
+        .order('seat_index', { ascending: true });
+
+      const amIInRoom = (pRows || []).some((p) => p.user_id === userId);
+      if (!amIInRoom) {
+        clearSavedRoom();
+        return;
+      }
+
+      setRoomPlayers(pRows || []);
+      setActiveRoom({
+        id: roomRow.id,
+        code: roomRow.room_code,
+        type: roomRow.room_type,
+        host_id: roomRow.host_id,
+      });
+      setIsPlaying(roomRow.status === 'playing');
+    },
+    [clearSavedRoom]
+  );
 
   const silentRefreshProfile = useCallback(async () => {
     const {
@@ -218,14 +292,15 @@ export default function MahjongApp() {
             setProfile(created as UserProfile);
           }
         }
-        cleanupOrphanRooms();
+        await cleanupOrphanRooms();
+        await restoreSavedRoomIfAny(session.user.id);
         fetchLeaderboard();
       } else {
         setProfile(null);
       }
       setLoading(false);
     },
-    [fetchLeaderboard, cleanupOrphanRooms]
+    [fetchLeaderboard, cleanupOrphanRooms, restoreSavedRoomIfAny]
   );
 
   useEffect(() => {
@@ -278,24 +353,13 @@ export default function MahjongApp() {
     if (activeRoom && profile) {
       await leaveAndCleanupRoom(activeRoom.id, profile.id);
     }
+    clearSavedRoom();
     await supabase.auth.signOut();
     setProfile(null);
     setActiveRoom(null);
     setIsPlaying(false);
+    router.push('/');
   }
-
-  const fetchPlayers = useCallback(async (roomId: string) => {
-    const { data } = await supabase
-      .from('room_players')
-      .select('*, profiles(username, rank_tier, rank_points)')
-      .eq('room_id', roomId)
-      .order('seat_index', { ascending: true });
-    if (data) {
-      setRoomPlayers(data);
-      return data;
-    }
-    return [];
-  }, []);
 
   // Sinkronisasi Waiting Room & Deteksi jika Room dibubarkan / status berubah
   useEffect(() => {
@@ -308,12 +372,12 @@ export default function MahjongApp() {
     const interval = setInterval(async () => {
       const { data: roomCheck } = await supabase
         .from('rooms')
-        .select('status, host_id')
+        .select('status, host_id, room_code')
         .eq('id', activeRoom.id)
         .maybeSingle();
 
-      // Jika room sudah dihapus karena kosong atau dibubarkan host
       if (!roomCheck) {
+        clearSavedRoom();
         setIsPlaying(false);
         setActiveRoom(null);
         setRoomPlayers([]);
@@ -331,9 +395,9 @@ export default function MahjongApp() {
         await fetchPlayers(activeRoom.id);
         if (roomCheck.status === 'playing') {
           setIsPlaying(true);
+          router.push(`/room/${roomCheck.room_code || activeRoom.code}`);
         }
       } else if (roomCheck.status === 'waiting') {
-        // Host mengembalikan semua pemain ke Ruang Tunggu (ganti kursi / siap-siap)
         await fetchPlayers(activeRoom.id);
         setIsPlaying(false);
       }
@@ -363,6 +427,7 @@ export default function MahjongApp() {
         },
         async (payload) => {
           if (payload.eventType === 'DELETE') {
+            clearSavedRoom();
             setIsPlaying(false);
             setActiveRoom(null);
             setRoomPlayers([]);
@@ -379,6 +444,7 @@ export default function MahjongApp() {
             if (updated.status === 'playing') {
               await fetchPlayers(activeRoom.id);
               setIsPlaying(true);
+              router.push(`/room/${updated.room_code || activeRoom.code}`);
             } else if (updated.status === 'waiting') {
               await fetchPlayers(activeRoom.id);
               setIsPlaying(false);
@@ -392,7 +458,7 @@ export default function MahjongApp() {
       clearInterval(interval);
       supabase.removeChannel(channel);
     };
-  }, [activeRoom, isPlaying, fetchPlayers, silentRefreshProfile]);
+  }, [activeRoom, isPlaying, fetchPlayers, silentRefreshProfile, clearSavedRoom, router]);
 
   async function createRoom(roomType: 'ranked' | 'private') {
     if (!profile) return;
@@ -417,12 +483,14 @@ export default function MahjongApp() {
       is_ready: true,
     });
 
+    saveRoomCode(room.room_code);
     setActiveRoom({
       id: room.id,
       code: room.room_code,
       type: roomType,
       host_id: room.host_id,
     });
+    router.push(`/room/${room.room_code}`);
   }
 
   async function joinPrivateRoom() {
@@ -467,12 +535,14 @@ export default function MahjongApp() {
     }
 
     await fetchPlayers(room.id);
+    saveRoomCode(room.room_code);
     setActiveRoom({
       id: room.id,
       code: room.room_code,
       type: room.room_type,
       host_id: room.host_id,
     });
+    router.push(`/room/${room.room_code}`);
   }
 
   async function handleSwitchSeat(targetSeatIndex: number) {
@@ -531,10 +601,11 @@ export default function MahjongApp() {
       .update({ status: 'playing' })
       .eq('id', activeRoom.id);
 
+    saveRoomCode(activeRoom.code);
     setIsPlaying(true);
+    router.push(`/room/${activeRoom.code}`);
   }
 
-  // Host mengembalikan semua pemain ke Ruang Tunggu (menghapus Bot & state meja)
   async function returnToWaitingRoomAsHost() {
     if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
 
@@ -554,7 +625,6 @@ export default function MahjongApp() {
     silentRefreshProfile();
   }
 
-  // Host membubarkan room untuk seluruh pemain
   async function disbandRoomAsHost() {
     if (!activeRoom) return;
     const roomId = activeRoom.id;
@@ -562,20 +632,24 @@ export default function MahjongApp() {
     await supabase.from('room_players').delete().eq('room_id', roomId);
     await supabase.from('rooms').delete().eq('id', roomId);
 
+    clearSavedRoom();
     setIsPlaying(false);
     setActiveRoom(null);
     setRoomPlayers([]);
     silentRefreshProfile();
+    router.push('/');
   }
 
   async function leaveRoom() {
     if (activeRoom && profile) {
       await leaveAndCleanupRoom(activeRoom.id, profile.id);
     }
+    clearSavedRoom();
     setIsPlaying(false);
     setActiveRoom(null);
     setRoomPlayers([]);
     silentRefreshProfile();
+    router.push('/');
   }
 
   if (loading) {
@@ -858,8 +932,8 @@ export default function MahjongApp() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <span className="text-xs text-stone-400">
-                  Kode {activeRoom.type === 'ranked' ? 'Ranked' : 'Private'}{' '}
-                  Room Temporary (Otomatis hilang jika kosong)
+                  Link & Kode {activeRoom.type === 'ranked' ? 'Ranked' : 'Private'}{' '}
+                  Room:
                 </span>
                 <div className="flex items-center gap-2 mt-1">
                   <span className="text-2xl font-mono font-bold text-amber-300 tracking-widest">
@@ -867,12 +941,13 @@ export default function MahjongApp() {
                   </span>
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(activeRoom.code);
+                      const shareUrl = `${window.location.origin}/room/${activeRoom.code}`;
+                      navigator.clipboard.writeText(shareUrl);
                       setCopied(true);
                       setTimeout(() => setCopied(false), 2000);
                     }}
                     className="p-2 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300"
-                    title="Salin Kode Room"
+                    title="Salin Link Room"
                   >
                     {copied ? (
                       <Check className="w-4 h-4 text-emerald-400" />
@@ -881,6 +956,9 @@ export default function MahjongApp() {
                     )}
                   </button>
                 </div>
+                <p className="text-[11px] text-stone-400 mt-1 break-all">
+                  https://imperial-mahjong.vercel.app/room/{activeRoom.code}
+                </p>
               </div>
 
               <div className="flex items-center gap-2">

@@ -961,7 +961,6 @@ export default function MahjongTable({
   const [claimSecondsLeft, setClaimSecondsLeft] = useState<number>(5);
   const [showChatPicker, setShowChatPicker] = useState<boolean>(false);
 
-  // State khusus alur pasca-pertandingan (Showdown & Auto-next saat Draw)
   const [hideWinModalForShowdown, setHideWinModalForShowdown] =
     useState<boolean>(false);
   const [drawCountdown, setDrawCountdown] = useState<number>(
@@ -1158,7 +1157,7 @@ export default function MahjongTable({
   const myMelds = gameState?.melds?.[String(mySeat)] || [];
   const isShowdown = Boolean(gameState?.winnerInfo);
 
-  // Hooks diletakkan di atas sebelum early return `if (!gameState)` agar jumlah hook selalu konsisten
+  // Hooks diletakkan di atas sebelum early return `if (!gameState)`
   const visibleCounts = React.useMemo(() => {
     const map: Record<string, number> = {};
     const countTile = (t: Tile) => {
@@ -1356,7 +1355,6 @@ export default function MahjongTable({
     }
   }, [initRound]);
 
-  // Auto-countdown 8 detik menuju Hand berikutnya jika ronde berakhir IMBANG (Draw / Huang Zhuang)
   const isDrawResult = gameState?.winnerInfo?.seat === -1;
   useEffect(() => {
     if (!isDrawResult) {
@@ -1470,20 +1468,33 @@ export default function MahjongTable({
     let isMounted = true;
 
     async function syncFromServer() {
-      const [{ data: stateRow }, { data: pRows }] = await Promise.all([
-        supabase
-          .from('game_states')
-          .select('*')
-          .eq('room_id', room.id)
-          .maybeSingle(),
-        supabase
-          .from('room_players')
-          .select('*, profiles(username, rank_tier, rank_points)')
-          .eq('room_id', room.id)
-          .order('seat_index', { ascending: true }),
-      ]);
+      const [{ data: roomRow }, { data: stateRow }, { data: pRows }] =
+        await Promise.all([
+          supabase
+            .from('rooms')
+            .select('id, status')
+            .eq('id', room.id)
+            .maybeSingle(),
+          supabase
+            .from('game_states')
+            .select('*')
+            .eq('room_id', room.id)
+            .maybeSingle(),
+          supabase
+            .from('room_players')
+            .select('*, profiles(username, rank_tier, rank_points)')
+            .eq('room_id', room.id)
+            .order('seat_index', { ascending: true }),
+        ]);
 
       if (!isMounted) return;
+
+      // Pengaman #3A: Jika host membubarkan room saat pemain sedang di meja / setelah refresh
+      if (!roomRow) {
+        onExitRoom();
+        return;
+      }
+
       if (pRows && pRows.length > 0) {
         setLivePlayers(pRows);
         livePlayersRef.current = pRows;
@@ -1533,6 +1544,18 @@ export default function MahjongTable({
           }
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'rooms',
+          filter: `id=eq.${room.id}`,
+        },
+        () => {
+          if (isMounted) onExitRoom();
+        }
+      )
       .subscribe();
 
     return () => {
@@ -1540,8 +1563,9 @@ export default function MahjongTable({
       clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
-  }, [room.id, isHost, initRound, parseDbRow]);
+  }, [room.id, isHost, initRound, parseDbRow, onExitRoom]);
 
+  // Pengaman #3B: Cegah RP terhitung ganda saat halaman di-refresh di layar kemenangan
   useEffect(() => {
     if (!hasWinner || !gameState?.winnerInfo) {
       recordedWinRef.current = null;
@@ -1549,12 +1573,12 @@ export default function MahjongTable({
     }
 
     const { seat, name, faan } = gameState.winnerInfo;
-    const winSig = `${seat}_${name}_${faan}`;
+    const roundNum = gameState.roundNumber ?? 1;
+    const winSig = `${room.id}_r${roundNum}_${seat}_${name}_${faan}`;
     if (recordedWinRef.current === winSig) return;
     recordedWinRef.current = winSig;
     playSoundEffect('win');
 
-    // Jika Imbang (Draw Game) atau Private Room -> 0 perubahan RP
     if (seat === -1 || room.type === 'private') {
       setRpChangeShown(0);
       return;
@@ -1563,6 +1587,14 @@ export default function MahjongTable({
     const didIWin = seat === mySeat;
     const delta = didIWin ? 20 + faan * 5 : -15;
     setRpChangeShown(delta);
+
+    const storageKey = `mahjong_rp_claimed_${winSig}_${profile.id}`;
+    if (typeof window !== 'undefined' && localStorage.getItem(storageKey)) {
+      return;
+    }
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(storageKey, '1');
+    }
 
     supabase
       .from('profiles')
@@ -1576,15 +1608,16 @@ export default function MahjongTable({
   }, [
     hasWinner,
     gameState?.winnerInfo,
+    gameState?.roundNumber,
     mySeat,
     profile.id,
     profile.rank_points,
     profile.matches_played,
     profile.wins,
+    room.id,
     room.type,
   ]);
 
-  // RESOLVER PRIORITY CLAIM WINDOW (WU > KONG / PONG > CHI)
   const resolveClaimWindow = useCallback(
     async (stateToResolve: GameStatePayload) => {
       const cw = stateToResolve.claimWindow;
@@ -1909,7 +1942,6 @@ export default function MahjongTable({
     [pushStateToSupabase, resolveClaimWindow]
   );
 
-  // TIMER BATAS 1 MENIT (60 DETIK) TIAP GILIRAN PEMAIN
   useEffect(() => {
     if (
       !gameState ||
@@ -1992,7 +2024,6 @@ export default function MahjongTable({
     executeDiscardWithPriorityCheck,
   ]);
 
-  // ENGINE BOT AI
   useEffect(() => {
     if (!isHost) return;
 
