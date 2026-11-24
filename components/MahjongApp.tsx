@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase, UserProfile } from '@/lib/supabase';
 import MahjongTable from './MahjongTable';
 import {
@@ -39,6 +39,17 @@ export default function MahjongApp() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [leaderboard, setLeaderboard] = useState<UserProfile[]>([]);
 
+  const activeRoomRef = useRef(activeRoom);
+  const profileRef = useRef(profile);
+
+  useEffect(() => {
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
+
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
   const fetchLeaderboard = useCallback(async () => {
     const { data } = await supabase
       .from('profiles')
@@ -48,7 +59,105 @@ export default function MahjongApp() {
     if (data) setLeaderboard(data as UserProfile[]);
   }, []);
 
-  // Refresh profil di latar belakang TANPA menyalakan loading screen (anti-blink saat menang)
+  // Sapu bersih room temporary yang sudah kosong dari manusia atau kadaluarsa (> 2 jam)
+  const cleanupOrphanRooms = useCallback(async () => {
+    try {
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const { data: oldRooms } = await supabase
+        .from('rooms')
+        .select('id')
+        .lt('created_at', twoHoursAgo);
+
+      if (oldRooms && oldRooms.length > 0) {
+        const ids = oldRooms.map((r) => r.id);
+        await supabase.from('game_states').delete().in('room_id', ids);
+        await supabase.from('room_players').delete().in('room_id', ids);
+        await supabase.from('rooms').delete().in('id', ids);
+      }
+
+      // Cek room aktif yang sudah tidak punya manusia sama sekali
+      const { data: recentRooms } = await supabase
+        .from('rooms')
+        .select('id')
+        .limit(20);
+
+      if (recentRooms && recentRooms.length > 0) {
+        for (const r of recentRooms) {
+          const { data: humans } = await supabase
+            .from('room_players')
+            .select('id')
+            .eq('room_id', r.id)
+            .eq('is_bot', false);
+
+          if (!humans || humans.length === 0) {
+            await supabase.from('game_states').delete().eq('room_id', r.id);
+            await supabase.from('room_players').delete().eq('room_id', r.id);
+            await supabase.from('rooms').delete().eq('id', r.id);
+          }
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Fungsi pembersih saat pemain keluar room / tutup tab
+  const leaveAndCleanupRoom = useCallback(
+    async (roomId: string, userId: string) => {
+      await supabase
+        .from('room_players')
+        .delete()
+        .eq('room_id', roomId)
+        .eq('user_id', userId);
+
+      // Cek apakah masih ada pemain asli (non-bot) di dalam room
+      const { data: remainingHumans } = await supabase
+        .from('room_players')
+        .select('id, user_id')
+        .eq('room_id', roomId)
+        .eq('is_bot', false)
+        .order('seat_index', { ascending: true });
+
+      if (!remainingHumans || remainingHumans.length === 0) {
+        // Tidak ada orang asli tersisa -> hapus room permanen beserta bot & game_states
+        await supabase.from('game_states').delete().eq('room_id', roomId);
+        await supabase.from('room_players').delete().eq('room_id', roomId);
+        await supabase.from('rooms').delete().eq('id', roomId);
+      } else {
+        // Jika yang keluar adalah Host, wariskan host_id ke pemain asli berikutnya
+        const { data: roomInfo } = await supabase
+          .from('rooms')
+          .select('host_id')
+          .eq('id', roomId)
+          .maybeSingle();
+
+        if (roomInfo && roomInfo.host_id === userId && remainingHumans[0]?.user_id) {
+          await supabase
+            .from('rooms')
+            .update({ host_id: remainingHumans[0].user_id })
+            .eq('id', roomId);
+        }
+      }
+    },
+    []
+  );
+
+  // Otomatis bersihkan kursi / room jika pemain menutup tab atau browser
+  useEffect(() => {
+    const handleTabClose = () => {
+      const r = activeRoomRef.current;
+      const p = profileRef.current;
+      if (r && p) {
+        leaveAndCleanupRoom(r.id, p.id);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleTabClose);
+    window.addEventListener('pagehide', handleTabClose);
+    return () => {
+      window.removeEventListener('beforeunload', handleTabClose);
+      window.removeEventListener('pagehide', handleTabClose);
+    };
+  }, [leaveAndCleanupRoom]);
+
   const silentRefreshProfile = useCallback(async () => {
     const {
       data: { session },
@@ -109,13 +218,14 @@ export default function MahjongApp() {
             setProfile(created as UserProfile);
           }
         }
+        cleanupOrphanRooms();
         fetchLeaderboard();
       } else {
         setProfile(null);
       }
       setLoading(false);
     },
-    [fetchLeaderboard]
+    [fetchLeaderboard, cleanupOrphanRooms]
   );
 
   useEffect(() => {
@@ -165,6 +275,9 @@ export default function MahjongApp() {
   }
 
   async function handleLogout() {
+    if (activeRoom && profile) {
+      await leaveAndCleanupRoom(activeRoom.id, profile.id);
+    }
     await supabase.auth.signOut();
     setProfile(null);
     setActiveRoom(null);
@@ -184,25 +297,47 @@ export default function MahjongApp() {
     return [];
   }, []);
 
-  // Sinkronisasi Waiting Room (Realtime + Polling cadangan setiap 2 detik)
+  // Sinkronisasi Waiting Room & Deteksi jika Room dibubarkan / status berubah
   useEffect(() => {
-    if (!activeRoom || isPlaying) return;
+    if (!activeRoom) return;
 
-    fetchPlayers(activeRoom.id);
+    if (!isPlaying) {
+      fetchPlayers(activeRoom.id);
+    }
 
     const interval = setInterval(async () => {
-      await fetchPlayers(activeRoom.id);
       const { data: roomCheck } = await supabase
         .from('rooms')
-        .select('status')
+        .select('status, host_id')
         .eq('id', activeRoom.id)
-        .single();
+        .maybeSingle();
 
-      if (roomCheck?.status === 'playing') {
-        await fetchPlayers(activeRoom.id);
-        setIsPlaying(true);
+      // Jika room sudah dihapus karena kosong atau dibubarkan host
+      if (!roomCheck) {
+        setIsPlaying(false);
+        setActiveRoom(null);
+        setRoomPlayers([]);
+        silentRefreshProfile();
+        return;
       }
-    }, 2000);
+
+      if (roomCheck.host_id !== activeRoom.host_id) {
+        setActiveRoom((prev) =>
+          prev ? { ...prev, host_id: roomCheck.host_id } : null
+        );
+      }
+
+      if (!isPlaying) {
+        await fetchPlayers(activeRoom.id);
+        if (roomCheck.status === 'playing') {
+          setIsPlaying(true);
+        }
+      } else if (roomCheck.status === 'waiting') {
+        // Host mengembalikan semua pemain ke Ruang Tunggu (ganti kursi / siap-siap)
+        await fetchPlayers(activeRoom.id);
+        setIsPlaying(false);
+      }
+    }, 1800);
 
     const channel = supabase
       .channel(`room_sync_${activeRoom.id}`)
@@ -214,20 +349,40 @@ export default function MahjongApp() {
           table: 'room_players',
           filter: `room_id=eq.${activeRoom.id}`,
         },
-        () => fetchPlayers(activeRoom.id)
+        () => {
+          if (!isPlaying) fetchPlayers(activeRoom.id);
+        }
       )
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
           table: 'rooms',
           filter: `id=eq.${activeRoom.id}`,
         },
         async (payload) => {
-          if (payload.new && payload.new.status === 'playing') {
-            await fetchPlayers(activeRoom.id);
-            setIsPlaying(true);
+          if (payload.eventType === 'DELETE') {
+            setIsPlaying(false);
+            setActiveRoom(null);
+            setRoomPlayers([]);
+            silentRefreshProfile();
+            return;
+          }
+          if (payload.new) {
+            const updated = payload.new as any;
+            if (updated.host_id) {
+              setActiveRoom((prev) =>
+                prev ? { ...prev, host_id: updated.host_id } : null
+              );
+            }
+            if (updated.status === 'playing') {
+              await fetchPlayers(activeRoom.id);
+              setIsPlaying(true);
+            } else if (updated.status === 'waiting') {
+              await fetchPlayers(activeRoom.id);
+              setIsPlaying(false);
+            }
           }
         }
       )
@@ -237,10 +392,11 @@ export default function MahjongApp() {
       clearInterval(interval);
       supabase.removeChannel(channel);
     };
-  }, [activeRoom, isPlaying, fetchPlayers]);
+  }, [activeRoom, isPlaying, fetchPlayers, silentRefreshProfile]);
 
   async function createRoom(roomType: 'ranked' | 'private') {
     if (!profile) return;
+    await cleanupOrphanRooms();
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const { data: room, error } = await supabase
       .from('rooms')
@@ -277,10 +433,10 @@ export default function MahjongApp() {
       .select('*')
       .eq('room_code', code)
       .eq('status', 'waiting')
-      .single();
+      .maybeSingle();
 
     if (!room) {
-      alert('Kode room tidak ditemukan atau pertandingan sudah dimulai.');
+      alert('Kode room tidak ditemukan, sudah bubar, atau pertandingan sedang berlangsung.');
       return;
     }
 
@@ -319,7 +475,6 @@ export default function MahjongApp() {
     });
   }
 
-  // Pindah ke slot kursi (East / South / West / North) yang masih kosong
   async function handleSwitchSeat(targetSeatIndex: number) {
     if (!activeRoom || !profile || switchingSeat) return;
 
@@ -379,13 +534,43 @@ export default function MahjongApp() {
     setIsPlaying(true);
   }
 
+  // Host mengembalikan semua pemain ke Ruang Tunggu (menghapus Bot & state meja)
+  async function returnToWaitingRoomAsHost() {
+    if (!activeRoom || !profile || activeRoom.host_id !== profile.id) return;
+
+    await supabase.from('game_states').delete().eq('room_id', activeRoom.id);
+    await supabase
+      .from('room_players')
+      .delete()
+      .eq('room_id', activeRoom.id)
+      .eq('is_bot', true);
+    await supabase
+      .from('rooms')
+      .update({ status: 'waiting' })
+      .eq('id', activeRoom.id);
+
+    await fetchPlayers(activeRoom.id);
+    setIsPlaying(false);
+    silentRefreshProfile();
+  }
+
+  // Host membubarkan room untuk seluruh pemain
+  async function disbandRoomAsHost() {
+    if (!activeRoom) return;
+    const roomId = activeRoom.id;
+    await supabase.from('game_states').delete().eq('room_id', roomId);
+    await supabase.from('room_players').delete().eq('room_id', roomId);
+    await supabase.from('rooms').delete().eq('id', roomId);
+
+    setIsPlaying(false);
+    setActiveRoom(null);
+    setRoomPlayers([]);
+    silentRefreshProfile();
+  }
+
   async function leaveRoom() {
     if (activeRoom && profile) {
-      await supabase
-        .from('room_players')
-        .delete()
-        .eq('room_id', activeRoom.id)
-        .eq('user_id', profile.id);
+      await leaveAndCleanupRoom(activeRoom.id, profile.id);
     }
     setIsPlaying(false);
     setActiveRoom(null);
@@ -413,7 +598,7 @@ export default function MahjongApp() {
               IMPERIAL MAHJONG
             </h1>
             <p className="text-xs text-stone-400 mt-1">
-              Hong Kong Mahjong • Ranked & Private Room
+              Hong Kong 144-Tile • Ranked & Private Room
             </p>
           </div>
 
@@ -531,6 +716,8 @@ export default function MahjongApp() {
         room={activeRoom}
         players={roomPlayers}
         onExitRoom={leaveRoom}
+        onReturnWaitingRoom={returnToWaitingRoomAsHost}
+        onDisbandRoom={disbandRoomAsHost}
         onProfileUpdated={silentRefreshProfile}
       />
     );
@@ -588,8 +775,8 @@ export default function MahjongApp() {
                   </div>
                   <p className="text-xs text-stone-300 leading-relaxed">
                     Kumpulkan Rank Points (RP) untuk naik dari tier Bronze
-                    hingga Master. Kursi kosong otomatis diisi Bot AI saat host
-                    memulai pertandingan.
+                    hingga Master. Room bersifat sementara dan otomatis terhapus
+                    saat kosong.
                   </p>
                 </div>
                 <button
@@ -672,7 +859,7 @@ export default function MahjongApp() {
               <div>
                 <span className="text-xs text-stone-400">
                   Kode {activeRoom.type === 'ranked' ? 'Ranked' : 'Private'}{' '}
-                  Room (Bagikan ke Teman)
+                  Room Temporary (Otomatis hilang jika kosong)
                 </span>
                 <div className="flex items-center gap-2 mt-1">
                   <span className="text-2xl font-mono font-bold text-amber-300 tracking-widest">
@@ -745,7 +932,8 @@ export default function MahjongApp() {
                         }`}
                       >
                         <div className="text-[11px] text-stone-400 mb-1">
-                          {wind} {isMe && <span className="text-amber-300">(Anda)</span>}
+                          {wind}{' '}
+                          {isMe && <span className="text-amber-300">(Anda)</span>}
                         </div>
                         <div className="font-semibold text-xs sm:text-sm text-amber-200 flex items-center justify-center gap-1 truncate">
                           <UserCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
