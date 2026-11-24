@@ -1157,7 +1157,6 @@ export default function MahjongTable({
   const myMelds = gameState?.melds?.[String(mySeat)] || [];
   const isShowdown = Boolean(gameState?.winnerInfo);
 
-  // Hooks diletakkan di atas sebelum early return `if (!gameState)`
   const visibleCounts = React.useMemo(() => {
     const map: Record<string, number> = {};
     const countTile = (t: Tile) => {
@@ -1489,7 +1488,6 @@ export default function MahjongTable({
 
       if (!isMounted) return;
 
-      // Pengaman #3A: Jika host membubarkan room saat pemain sedang di meja / setelah refresh
       if (!roomRow) {
         onExitRoom();
         return;
@@ -1565,7 +1563,6 @@ export default function MahjongTable({
     };
   }, [room.id, isHost, initRound, parseDbRow, onExitRoom]);
 
-  // Pengaman #3B: Cegah RP terhitung ganda saat halaman di-refresh di layar kemenangan
   useEffect(() => {
     if (!hasWinner || !gameState?.winnerInfo) {
       recordedWinRef.current = null;
@@ -1831,13 +1828,14 @@ export default function MahjongTable({
         Boolean(cw.decisions[String(s)])
       );
 
-      if (isHost && (allDecided || remMs === 0)) {
+      // Selesaikan jika semua sudah memutuskan ATAU waktu claim sudah habis (0s)
+      if (allDecided || remMs === 0) {
         await resolveClaimWindow(latest);
       }
     }, 300);
 
     return () => clearInterval(interval);
-  }, [gameState?.claimWindow, gameState?.winnerInfo, isHost, resolveClaimWindow]);
+  }, [gameState?.claimWindow, gameState?.winnerInfo, resolveClaimWindow]);
 
   const executeDiscardWithPriorityCheck = useCallback(
     async (
@@ -2025,8 +2023,6 @@ export default function MahjongTable({
   ]);
 
   useEffect(() => {
-    if (!isHost) return;
-
     const botWatchdog = setInterval(async () => {
       const latest = gameStateRef.current;
       if (
@@ -2039,10 +2035,24 @@ export default function MahjongTable({
         return;
       }
 
+      if (latest.turn === mySeat) return;
+
       const currentSeatObj = livePlayersRef.current.find(
         (p) => p.seat_index === latest.turn
       );
-      if (!currentSeatObj || !currentSeatObj.is_bot) return;
+
+      // Jika kursi ini milik pemain manusia terdaftar yang bukan bot, jangan dijalankan bot
+      if (currentSeatObj && !currentSeatObj.is_bot && currentSeatObj.user_id) {
+        return;
+      }
+
+      // Hanya host (atau pemain pertama jika host tidak aktif) yang mengeksekusi langkah bot agar tidak dobel
+      const isActiveExecutor =
+        isHost ||
+        !livePlayersRef.current.some(
+          (p) => p.user_id === room.host_id && !p.is_bot
+        );
+      if (!isActiveExecutor) return;
 
       botBusyRef.current = true;
       const activeTurn = latest.turn;
@@ -2062,7 +2072,7 @@ export default function MahjongTable({
           }
 
           const seatKey = String(activeTurn);
-          const botName = currentSeatObj.bot_name || `Bot ${activeTurn + 1}`;
+          const botName = currentSeatObj?.bot_name || `Bot ${activeTurn + 1}`;
           let botHand = [...(fresh.hands[seatKey] || [])];
           let botBonuses = [...(fresh.bonuses[seatKey] || [])];
           let botMelds = [...(fresh.melds[seatKey] || [])];
@@ -2202,11 +2212,11 @@ export default function MahjongTable({
         } finally {
           botBusyRef.current = false;
         }
-      }, 1900);
+      }, 1400);
     }, 600);
 
     return () => clearInterval(botWatchdog);
-  }, [isHost, pushStateToSupabase, executeDiscardWithPriorityCheck]);
+  }, [isHost, mySeat, room.host_id, pushStateToSupabase, executeDiscardWithPriorityCheck]);
 
   const handleManualDraw = async () => {
     if (
@@ -2432,7 +2442,9 @@ export default function MahjongTable({
     (p) => p.seat_index === gameState.turn
   );
   const isBotThinking =
-    Boolean(currentTurnObj?.is_bot) && !gameState.claimWindow;
+    Boolean(currentTurnObj?.is_bot || !currentTurnObj) &&
+    gameState.turn !== mySeat &&
+    !gameState.claimWindow;
 
   const myBonuses = gameState.bonuses[String(bottomSeat)] || [];
   const topHand = gameState.hands[String(topSeat)] || [];
@@ -3313,7 +3325,6 @@ export default function MahjongTable({
               </>
             )}
 
-            {/* Rincian Faan Breakdown */}
             {!isDrawResult &&
               gameState.winnerInfo.breakdown &&
               gameState.winnerInfo.breakdown.length > 0 && (
@@ -3335,7 +3346,6 @@ export default function MahjongTable({
                 </div>
               )}
 
-            {/* Papan Skor Akumulasi Sesi Meja Ini */}
             <div className="bg-stone-950/90 border border-stone-800 rounded-xl p-2.5 text-left space-y-1">
               <div className="text-[11px] font-bold text-stone-400 flex items-center justify-between">
                 <span>Skor Sesi Room ({room.code}):</span>
@@ -3379,7 +3389,6 @@ export default function MahjongTable({
               </div>
             </div>
 
-            {/* Tombol Keputusan Pasca-Ronde */}
             {isHost ? (
               <div className="space-y-2 pt-1">
                 <button
