@@ -1155,6 +1155,38 @@ export default function MahjongTable({
     return res;
   }, [rawMyHand, customOrderIds]);
 
+  const myMelds = gameState?.melds?.[String(mySeat)] || [];
+  const isShowdown = Boolean(gameState?.winnerInfo);
+
+  // Hooks diletakkan di atas sebelum early return `if (!gameState)` agar jumlah hook selalu konsisten
+  const visibleCounts = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    const countTile = (t: Tile) => {
+      const k = `${t.suit}_${t.value}`;
+      map[k] = (map[k] || 0) + 1;
+    };
+    (gameState?.discards || []).forEach(countTile);
+    Object.values(gameState?.melds || {}).forEach((mList) =>
+      mList.forEach((m) => m.tiles.forEach(countTile))
+    );
+    orderedMyHand.forEach(countTile);
+    return map;
+  }, [gameState?.discards, gameState?.melds, orderedMyHand]);
+
+  const tenpaiWaits = React.useMemo(() => {
+    if (gameState?.diceInfo?.phase !== 'playing' || isShowdown) return [];
+    return getTenpaiWaitingTiles(orderedMyHand, myMelds.length).map((w) => {
+      const used = visibleCounts[`${w.suit}_${w.value}`] || 0;
+      return { ...w, remaining: Math.max(0, 4 - used) };
+    });
+  }, [
+    gameState?.diceInfo?.phase,
+    isShowdown,
+    orderedMyHand,
+    myMelds.length,
+    visibleCounts,
+  ]);
+
   const moveTilePosition = (fromIndex: number, toIndex: number) => {
     if (
       fromIndex < 0 ||
@@ -1289,12 +1321,12 @@ export default function MahjongTable({
     const winSeat = latest.winnerInfo.seat;
     const winFaan = latest.winnerInfo.faan;
     const updatedScores: Record<string, number> = {
-  '0': 0,
-  '1': 0,
-  '2': 0,
-  '3': 0,
-  ...(latest.sessionScores || {}),
-};
+      '0': 0,
+      '1': 0,
+      '2': 0,
+      '3': 0,
+      ...(latest.sessionScores || {}),
+    };
 
     if (winSeat >= 0) {
       const gained = 10 + winFaan * 5;
@@ -2296,12 +2328,12 @@ export default function MahjongTable({
   const declareSelfWin = async () => {
     if (!gameState) return;
     playSoundEffect('win');
-    const myMelds = gameState.melds[String(mySeat)] || [];
-    const myBonuses = gameState.bonuses[String(mySeat)] || [];
+    const currentMelds = gameState.melds[String(mySeat)] || [];
+    const currentBonuses = gameState.bonuses[String(mySeat)] || [];
     const faanRes = calculateHongKongFaan(
       orderedMyHand,
-      myMelds,
-      myBonuses,
+      currentMelds,
+      currentBonuses,
       mySeat,
       gameState.dealerSeat ?? 0,
       gameState.prevailingWind ?? 1,
@@ -2371,7 +2403,6 @@ export default function MahjongTable({
   const isBotThinking =
     Boolean(currentTurnObj?.is_bot) && !gameState.claimWindow;
 
-  const myMelds = gameState.melds[String(bottomSeat)] || [];
   const myBonuses = gameState.bonuses[String(bottomSeat)] || [];
   const topHand = gameState.hands[String(topSeat)] || [];
   const topMelds = gameState.melds[String(topSeat)] || [];
@@ -2383,7 +2414,6 @@ export default function MahjongTable({
   const rightMelds = gameState.melds[String(rightSeat)] || [];
   const rightBonuses = gameState.bonuses[String(rightSeat)] || [];
 
-  const isShowdown = Boolean(gameState.winnerInfo);
   const playerCanSelfHu =
     !gameState.claimWindow && !isShowdown && canWin(orderedMyHand, myMelds.length);
 
@@ -2434,34 +2464,6 @@ export default function MahjongTable({
       });
     }
   }
-
-  const visibleCounts = React.useMemo(() => {
-    const map: Record<string, number> = {};
-    const countTile = (t: Tile) => {
-      const k = `${t.suit}_${t.value}`;
-      map[k] = (map[k] || 0) + 1;
-    };
-    gameState.discards.forEach(countTile);
-    Object.values(gameState.melds).forEach((mList) =>
-      mList.forEach((m) => m.tiles.forEach(countTile))
-    );
-    orderedMyHand.forEach(countTile);
-    return map;
-  }, [gameState.discards, gameState.melds, orderedMyHand]);
-
-  const tenpaiWaits = React.useMemo(() => {
-    if (gameState.diceInfo.phase !== 'playing' || isShowdown) return [];
-    return getTenpaiWaitingTiles(orderedMyHand, myMelds.length).map((w) => {
-      const used = visibleCounts[`${w.suit}_${w.value}`] || 0;
-      return { ...w, remaining: Math.max(0, 4 - used) };
-    });
-  }, [
-    gameState.diceInfo.phase,
-    isShowdown,
-    orderedMyHand,
-    myMelds.length,
-    visibleCounts,
-  ]);
 
   const cw = gameState.claimWindow;
   const amIEligibleToClaim = Boolean(
